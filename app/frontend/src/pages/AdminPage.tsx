@@ -12,7 +12,7 @@ export default function AdminPage() {
   const { user, logout } = useAuth();
   const qc = useQueryClient();
 
-  const [form, setForm] = useState({ username: '', email: '', password: '', role: 'reader' });
+  const [form, setForm] = useState({ username: '', password: '', role: 'reader' });
   const [transferTo, setTransferTo] = useState('');
 
   const { data: users = [] } = useQuery<User[]>({
@@ -59,11 +59,11 @@ export default function AdminPage() {
         <section className="bg-white rounded-xl border p-6">
           <h2 className="font-semibold text-gray-700 mb-4 flex items-center gap-2"><UserPlus size={16} /> Создать пользователя</h2>
           <div className="grid grid-cols-2 gap-3">
-            {(['username', 'email', 'password'] as const).map((field) => (
+            {(['username', 'password'] as const).map((field) => (
               <input
                 key={field}
                 type={field === 'password' ? 'password' : 'text'}
-                placeholder={field === 'username' ? 'Логин' : field === 'email' ? 'Email' : 'Пароль'}
+                placeholder={field === 'username' ? 'Логин' : 'Пароль'}
                 value={form[field]}
                 onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
                 className="border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -94,7 +94,7 @@ export default function AdminPage() {
               <div key={u.id} className="flex items-center justify-between py-2 border-b last:border-0">
                 <div>
                   <span className="font-medium text-gray-800">{u.username}</span>
-                  <span className="text-xs text-gray-400 ml-2">{u.email}</span>
+                  <span className="text-xs text-gray-400 ml-2">{u.role}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <select
