@@ -31,12 +31,12 @@ router.post('/login', async (req, res) => {
 
 // Create user (admin only)
 router.post('/users', authenticate, requireAdmin, async (req, res) => {
-  const { username, email, password, role } = req.body;
+  const { username, password, role } = req.body;
   try {
     const hash = await bcrypt.hash(password, 12);
     const { rows } = await query(
-      'INSERT INTO users (username, email, password_hash, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, username, email, role',
-      [username, email, hash, role || 'reader', req.user.id]
+      'INSERT INTO users (username, email, password_hash, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, username, role',
+      [username, `${username}@tableweb.local`, hash, role || 'reader', req.user.id]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
