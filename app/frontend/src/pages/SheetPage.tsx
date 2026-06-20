@@ -123,7 +123,7 @@ export default function SheetPage() {
             setImportState({ active: false, progress: 0, error: data.error });
           } else {
             // Re-fetch data then force Workbook remount with new key
-            await qc.invalidateQueries({ queryKey: ['sheet', id] });
+            qc.invalidateQueries({ queryKey: ['sheet', id] });
             setWorkbookKey((k) => k + 1);
             setImportState({ active: false, progress: 0, error: null });
           }
