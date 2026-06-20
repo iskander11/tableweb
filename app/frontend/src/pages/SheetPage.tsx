@@ -122,10 +122,13 @@ export default function SheetPage() {
           if (data.error) {
             setImportState({ active: false, progress: 0, error: data.error });
           } else {
-            // Re-fetch data then force Workbook remount with new key
-            qc.invalidateQueries({ queryKey: ['sheet', id] });
-            setWorkbookKey((k) => k + 1);
-            setImportState({ active: false, progress: 0, error: null });
+            // Explicitly fetch fresh data, build sheets, then remount Workbook
+            api.get(`/spreadsheets/${id}`).then((r) => {
+              const fresh = buildSheets(r.data);
+              setSheets(fresh.length ? fresh : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }]);
+              setWorkbookKey((k) => k + 1);
+              setImportState({ active: false, progress: 0, error: null });
+            });
           }
         }
       } catch { /* ignore parse errors */ }
