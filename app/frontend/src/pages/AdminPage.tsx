@@ -22,7 +22,7 @@ export default function AdminPage() {
 
   const createUser = useMutation({
     mutationFn: () => api.post('/auth/users', form),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); setForm({ username: '', email: '', password: '', role: 'reader' }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); setForm({ username: '', password: '', role: 'reader' }); },
   });
 
   const deleteUser = useMutation({
