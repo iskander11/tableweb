@@ -42,6 +42,7 @@ export default function SheetPage() {
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [sheets, setSheets] = useState<any[]>([]);
   const [importState, setImportState] = useState<ImportState>({ active: false, progress: 0, error: null });
+  const [workbookKey, setWorkbookKey] = useState(0);
   const workbookRef = useRef<any>(null);
 
   const { data: sheetMeta } = useQuery({
@@ -121,8 +122,9 @@ export default function SheetPage() {
           if (data.error) {
             setImportState({ active: false, progress: 0, error: data.error });
           } else {
-            // Refresh sheet data and update Workbook without page reload
-            qc.invalidateQueries({ queryKey: ['sheet', id] });
+            // Re-fetch data then force Workbook remount with new key
+            await qc.invalidateQueries({ queryKey: ['sheet', id] });
+            setWorkbookKey((k) => k + 1);
             setImportState({ active: false, progress: 0, error: null });
           }
         }
@@ -205,6 +207,7 @@ export default function SheetPage() {
 
       <div className="flex-1 overflow-hidden">
         <Workbook
+          key={workbookKey}
           ref={workbookRef}
           data={sheets}
           onChange={handleChange}
