@@ -10,6 +10,12 @@ import { useAuth } from '../store/auth';
 
 interface OnlineUser { id: string; username: string }
 
+interface ImportState {
+  active: boolean;
+  progress: number;
+  error: string | null;
+}
+
 export default function SheetPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -17,6 +23,7 @@ export default function SheetPage() {
   const socketRef = useRef<Socket | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [sheets, setSheets] = useState<any[]>([]);
+  const [importState, setImportState] = useState<ImportState>({ active: false, progress: 0, error: null });
   const workbookRef = useRef<any>(null);
 
   const { data: sheetMeta } = useQuery({
@@ -27,7 +34,6 @@ export default function SheetPage() {
   useEffect(() => {
     if (!sheetMeta) return;
 
-    // Initialize sheet data from DB
     const initialSheets = (sheetMeta.sheets || []).map((s: any, i: number) => ({
       name: s.data?.name || `Sheet${i + 1}`,
       index: i,
@@ -49,8 +55,7 @@ export default function SheetPage() {
     socket.emit('join-sheet', id);
     socket.on('room-users', setOnlineUsers);
     socket.on('cell-change', ({ changes }) => {
-      // Apply remote changes to workbook
-      workbookRef.current?.applyOp(changes);
+      workbookRef.current?.applyOp?.(changes);
     });
 
     return () => { socket.disconnect(); };
@@ -87,16 +92,79 @@ export default function SheetPage() {
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const form = new FormData();
-    form.append('file', file);
-    await api.post(`/excel/${id}/import`, form);
-    window.location.reload();
+    e.target.value = '';
+
+    const jobId = `job_${Date.now()}`;
+    setImportState({ active: true, progress: 0, error: null });
+
+    // Subscribe to progress via SSE
+    const evtSource = new EventSource(`/api/excel/${id}/import-progress?jobId=${jobId}`, {});
+    evtSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      setImportState((s) => ({ ...s, progress: data.progress }));
+      if (data.done) {
+        evtSource.close();
+        if (data.error) {
+          setImportState({ active: false, progress: 0, error: data.error });
+        } else {
+          // Reload page to get fresh data from server
+          setTimeout(() => window.location.reload(), 300);
+        }
+      }
+    };
+    evtSource.onerror = () => evtSource.close();
+
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      await api.post(`/excel/${id}/import?jobId=${jobId}`, form);
+    } catch (err: any) {
+      evtSource.close();
+      setImportState({ active: false, progress: 0, error: err.response?.data?.error || 'Ошибка импорта' });
+    }
   };
 
-  if (!sheets.length) return <div className="flex items-center justify-center h-screen text-gray-400">Загрузка...</div>;
+  if (!sheets.length) {
+    return (
+      <div className="flex items-center justify-center h-screen text-gray-400">
+        Загрузка таблицы...
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen bg-gray-50">
+      {/* Import progress overlay */}
+      {importState.active && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">
+          <div className="bg-white rounded-2xl shadow-xl p-8 w-80">
+            <h3 className="font-semibold text-gray-800 mb-4 text-center">Импорт файла</h3>
+            <div className="w-full bg-gray-100 rounded-full h-3 mb-3">
+              <div
+                className="bg-blue-500 h-3 rounded-full transition-all duration-300"
+                style={{ width: `${importState.progress}%` }}
+              />
+            </div>
+            <p className="text-center text-sm text-gray-500">
+              {importState.progress < 100 ? `${importState.progress}% — обработка...` : 'Сохранение...'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Error toast */}
+      {importState.error && (
+        <div className="fixed top-4 right-4 z-50 bg-red-50 border border-red-200 rounded-xl px-4 py-3 shadow">
+          <p className="text-red-600 text-sm">{importState.error}</p>
+          <button
+            onClick={() => setImportState((s) => ({ ...s, error: null }))}
+            className="text-xs text-red-400 underline mt-1"
+          >
+            Закрыть
+          </button>
+        </div>
+      )}
+
       <header className="bg-white border-b px-4 py-2 flex items-center gap-3">
         <button onClick={() => navigate('/')} className="p-1 rounded hover:bg-gray-100">
           <ArrowLeft size={18} />
@@ -112,12 +180,15 @@ export default function SheetPage() {
 
         {isEditor() && (
           <>
-            <label className="flex items-center gap-1 cursor-pointer text-sm text-gray-600 hover:text-gray-800">
-              <Upload size={15} /> Импорт
+            <label className="flex items-center gap-1 cursor-pointer text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
+              <Upload size={14} /> Импорт .xlsx
               <input type="file" accept=".xlsx,.xls" className="hidden" onChange={handleImport} />
             </label>
-            <button onClick={handleExport} className="flex items-center gap-1 text-sm text-gray-600 hover:text-gray-800">
-              <Download size={15} /> Экспорт
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-1 text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50"
+            >
+              <Download size={14} /> Экспорт .xlsx
             </button>
           </>
         )}
@@ -127,8 +198,8 @@ export default function SheetPage() {
         <Workbook
           ref={workbookRef}
           data={sheets}
-          onChange={(data) => {
-            if (isEditor()) {
+          onChange={(data: any) => {
+            if (isEditor() && data?.length) {
               handleCellChange(data);
               handleSave(data[0]);
             }
@@ -143,14 +214,16 @@ export default function SheetPage() {
 }
 
 function flattenCells(cells: Record<string, any>) {
-  return Object.entries(cells).map(([key, val]) => {
+  return Object.entries(cells).map(([key, v]) => {
     const [r, c] = key.split('_').map(Number);
-    return { r, c, v: val };
+    return { r, c, v };
   });
 }
 
 function unflattenCells(celldata: any[]) {
   const cells: Record<string, any> = {};
-  celldata.forEach(({ r, c, v }) => { cells[`${r}_${c}`] = v; });
+  (celldata || []).forEach(({ r, c, v }) => {
+    if (v !== undefined) cells[`${r}_${c}`] = v;
+  });
   return cells;
 }

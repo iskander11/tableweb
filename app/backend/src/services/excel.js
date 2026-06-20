@@ -1,103 +1,220 @@
 import ExcelJS from 'exceljs';
 
-// Convert ARGB hex to CSS color
+// ARGB (ExcelJS format: FFRRGGBB) -> CSS hex (#RRGGBB)
 const argbToCss = (argb) => {
-  if (!argb || argb === '00000000') return null;
-  if (argb.length === 8) return `#${argb.slice(2)}`;
-  return `#${argb}`;
+  if (!argb || argb.length < 6) return null;
+  // ExcelJS gives 8-char ARGB: FF at start = fully opaque
+  const hex = argb.length === 8 ? argb.slice(2) : argb;
+  if (hex === '000000' || hex === '000') return '#000000';
+  return `#${hex.toUpperCase()}`;
 };
 
-// Convert CSS hex to ARGB
+// CSS hex -> ARGB
 const cssToArgb = (css) => {
-  if (!css) return '00000000';
-  const hex = css.replace('#', '');
-  return `FF${hex.toUpperCase()}`;
+  if (!css) return 'FF000000';
+  const hex = css.replace('#', '').toUpperCase();
+  return `FF${hex.padEnd(6, '0')}`;
 };
 
-export async function importExcel(buffer) {
+// ExcelJS border style -> FortuneSheet border style
+const borderStyle = (border) => {
+  if (!border?.style) return null;
+  const color = argbToCss(border.color?.argb) || '#000000';
+  return { style: border.style === 'medium' ? '2' : '1', color };
+};
+
+// Get actual cell value (handling formula cells)
+const getCellValue = (cell) => {
+  const val = cell.value;
+  if (val === null || val === undefined) return { v: null, f: null };
+
+  // Formula cell
+  if (typeof val === 'object' && val !== null && 'formula' in val) {
+    const formula = val.formula || val.sharedFormula || '';
+    const result = val.result;
+    // Handle error results
+    if (result && typeof result === 'object' && result.error) {
+      return { v: result.error, f: formula };
+    }
+    return { v: result ?? '', f: formula };
+  }
+
+  // Date
+  if (val instanceof Date) {
+    return { v: val.toISOString(), f: null };
+  }
+
+  // Rich text
+  if (typeof val === 'object' && 'richText' in val) {
+    const text = val.richText.map((r) => r.text).join('');
+    return { v: text, f: null };
+  }
+
+  return { v: val, f: null };
+};
+
+// Get cell type for FortuneSheet: n=number, s=string, b=boolean
+const getCellType = (cell, v) => {
+  if (v === null || v === undefined) return null;
+  const t = cell.type;
+  if (t === 4) return 'b'; // boolean
+  if (typeof v === 'number') return 'n';
+  if (typeof v === 'boolean') return 'b';
+  return 's';
+};
+
+export async function importExcel(buffer, onProgress) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
 
   const sheets = [];
+  const totalSheets = workbook.worksheets.length;
+  let sheetsDone = 0;
 
-  workbook.eachSheet((worksheet) => {
+  for (const worksheet of workbook.worksheets) {
     const cells = {};
     const columnWidths = {};
     const rowHeights = {};
 
-    // Column widths
+    // --- Column widths ---
+    // ExcelJS width unit is "characters" at default font (Calibri 11)
+    // 1 character ≈ 7px. Default Excel column width = 8.43 chars ≈ 64px
     worksheet.columns.forEach((col, idx) => {
-      if (col.width) columnWidths[idx] = Math.round(col.width * 8); // pts to px approx
+      if (col && col.width && col.width > 0) {
+        columnWidths[idx] = Math.round(col.width * 7.5);
+      }
     });
 
-    // Row heights
+    const totalRows = worksheet.rowCount;
+    let rowsDone = 0;
+
+    // --- Rows, cells, styles ---
     worksheet.eachRow({ includeEmpty: false }, (row, rowNum) => {
-      if (row.height) rowHeights[rowNum - 1] = row.height * 1.33; // pts to px
+      const r = rowNum - 1;
+
+      // Row height: ExcelJS uses points (pt), FortuneSheet uses pixels
+      // 1pt ≈ 1.333px
+      if (row.height && row.height > 0) {
+        rowHeights[r] = Math.round(row.height * 1.333);
+      }
 
       row.eachCell({ includeEmpty: true }, (cell, colNum) => {
-        const r = rowNum - 1;
         const c = colNum - 1;
         const key = `${r}_${c}`;
 
-        const cellData = {
-          v: cell.value,
-          m: cell.text || '',
-        };
+        const { v, f } = getCellValue(cell);
 
-        // Formula
-        if (cell.formula) {
-          cellData.f = cell.formula;
-          cellData.v = cell.result ?? '';
-        }
+        // Skip completely empty cells
+        if (v === null && !f && !cell.style) return;
 
-        // Style
-        const style = {};
-        if (cell.font) {
-          if (cell.font.bold) style.bl = 1;
-          if (cell.font.italic) style.it = 1;
-          if (cell.font.size) style.fs = cell.font.size;
-          if (cell.font.color?.argb) style.fc = argbToCss(cell.font.color.argb);
-        }
-        if (cell.fill?.fgColor?.argb) {
-          style.bg = argbToCss(cell.fill.fgColor.argb);
-        }
-        if (cell.alignment) {
-          if (cell.alignment.horizontal) style.ht = { left: 1, center: 0, right: 2 }[cell.alignment.horizontal] ?? 1;
-          if (cell.alignment.wrapText) style.tb = 2;
-        }
-        if (cell.border) {
-          style.bd = {
-            t: cell.border.top ? { style: 'thin', color: '#000000' } : null,
-            b: cell.border.bottom ? { style: 'thin', color: '#000000' } : null,
-            l: cell.border.left ? { style: 'thin', color: '#000000' } : null,
-            r: cell.border.right ? { style: 'thin', color: '#000000' } : null,
-          };
+        const cellData = {};
+
+        // Value
+        cellData.v = v;
+        cellData.m = cell.text ?? (v !== null ? String(v) : '');
+
+        // Type
+        const t = getCellType(cell, v);
+        if (t) cellData.t = t;
+
+        // Formula (FortuneSheet stores without leading '=')
+        if (f) {
+          cellData.f = f.startsWith('=') ? f.slice(1) : f;
         }
 
-        if (Object.keys(style).length) cellData.s = style;
+        // --- Styles ---
+        const style = cell.style || {};
 
-        // Merge info
-        worksheet.model.merges?.forEach((merge) => {
-          // handled by FortuneSheet merge map
-        });
+        // Background color
+        const fill = style.fill || cell.fill;
+        if (fill && fill.type === 'pattern' && fill.pattern !== 'none') {
+          const fg = fill.fgColor;
+          if (fg) {
+            let color = null;
+            if (fg.argb) color = argbToCss(fg.argb);
+            else if (fg.theme !== undefined) {
+              // Theme colors - use common defaults
+              const themeColors = ['#FFFFFF','#000000','#E7E6E6','#44546A','#4472C4','#ED7D31','#A9D18E','#FF0000','#FFFF00','#00B0F0'];
+              color = themeColors[fg.theme] || null;
+            }
+            if (color && color !== '#FFFFFF') cellData.bg = color;
+          }
+        }
+
+        // Font
+        const font = style.font || cell.font;
+        if (font) {
+          if (font.bold) cellData.bl = 1;
+          if (font.italic) cellData.it = 1;
+          if (font.underline) cellData.un = 1;
+          if (font.size) cellData.fs = font.size;
+          if (font.name) cellData.ff = font.name;
+          if (font.color) {
+            let fc = null;
+            if (font.color.argb) fc = argbToCss(font.color.argb);
+            else if (font.color.theme !== undefined) {
+              const themeColors = ['#FFFFFF','#000000','#E7E6E6','#44546A','#4472C4','#ED7D31','#A9D18E','#FF0000','#FFFF00','#00B0F0'];
+              fc = themeColors[font.color.theme] || null;
+            }
+            if (fc && fc !== '#000000') cellData.fc = fc;
+          }
+        }
+
+        // Alignment
+        const alignment = style.alignment || cell.alignment;
+        if (alignment) {
+          if (alignment.horizontal) {
+            cellData.ht = { left: 1, center: 0, right: 2 }[alignment.horizontal] ?? 1;
+          }
+          if (alignment.vertical) {
+            cellData.vt = { middle: 0, top: 1, bottom: 2 }[alignment.vertical] ?? 0;
+          }
+          if (alignment.wrapText) cellData.tb = 2;
+        }
+
+        // Borders
+        const border = style.border || cell.border;
+        if (border) {
+          const bd = {};
+          if (border.top) bd.t = borderStyle(border.top);
+          if (border.bottom) bd.b = borderStyle(border.bottom);
+          if (border.left) bd.l = borderStyle(border.left);
+          if (border.right) bd.r = borderStyle(border.right);
+          if (Object.keys(bd).length) cellData.bd = bd;
+        }
+
+        // Number format
+        const numFmt = style.numFmt || cell.numFmt;
+        if (numFmt) cellData.fm = numFmt;
 
         cells[key] = cellData;
       });
+
+      rowsDone++;
+      if (onProgress && totalRows > 0) {
+        const pct = Math.round(((sheetsDone / totalSheets) + (rowsDone / totalRows / totalSheets)) * 100);
+        onProgress(pct);
+      }
     });
 
-    // Merged cells
+    // --- Merged cells ---
     const merges = {};
-    (worksheet.model.merges || []).forEach((mergeStr) => {
-      const [start, end] = mergeStr.split(':');
-      const sc = worksheet.getCell(start);
-      const ec = worksheet.getCell(end);
-      const r = sc.row - 1;
-      const c = sc.col - 1;
-      merges[`${r}_${c}`] = {
-        r, c,
-        rs: ec.row - sc.row + 1,
-        cs: ec.col - sc.col + 1,
-      };
+    const mergeList = worksheet.model?.merges || [];
+    mergeList.forEach((mergeStr) => {
+      try {
+        const [startRef, endRef] = mergeStr.split(':');
+        const startCell = worksheet.getCell(startRef);
+        const endCell = worksheet.getCell(endRef);
+        const r = startCell.row - 1;
+        const c = startCell.col - 1;
+        const rs = endCell.row - startCell.row + 1;
+        const cs = endCell.col - startCell.col + 1;
+        if (rs > 1 || cs > 1) {
+          merges[`${r}_${c}`] = { r, c, rs, cs };
+        }
+      } catch {
+        // skip invalid merge refs
+      }
     });
 
     sheets.push({
@@ -107,7 +224,10 @@ export async function importExcel(buffer) {
       rowHeights,
       merges,
     });
-  });
+
+    sheetsDone++;
+    if (onProgress) onProgress(Math.round((sheetsDone / totalSheets) * 100));
+  }
 
   return sheets;
 }
@@ -118,62 +238,81 @@ export async function exportExcel(sheetsData) {
   for (const sheet of sheetsData) {
     const worksheet = workbook.addWorksheet(sheet.name || 'Sheet1');
 
-    // Apply column widths
+    // Column widths (px -> chars)
     if (sheet.columnWidths) {
       Object.entries(sheet.columnWidths).forEach(([idx, px]) => {
-        worksheet.getColumn(parseInt(idx) + 1).width = px / 8;
+        const colNum = parseInt(idx) + 1;
+        worksheet.getColumn(colNum).width = Math.round(px / 7.5 * 10) / 10;
       });
     }
 
-    // Apply row heights
+    // Row heights (px -> pts)
     if (sheet.rowHeights) {
       Object.entries(sheet.rowHeights).forEach(([rowIdx, px]) => {
-        worksheet.getRow(parseInt(rowIdx) + 1).height = px / 1.33;
+        worksheet.getRow(parseInt(rowIdx) + 1).height = Math.round(px / 1.333 * 10) / 10;
       });
     }
 
-    // Apply cell data
+    // Cells
     if (sheet.cells) {
-      Object.entries(sheet.cells).forEach(([key, cellData]) => {
+      Object.entries(sheet.cells).forEach(([key, cd]) => {
         const [r, c] = key.split('_').map(Number);
         const cell = worksheet.getCell(r + 1, c + 1);
 
-        if (cellData.f) {
-          cell.value = { formula: cellData.f, result: cellData.v };
-        } else if (cellData.v !== undefined && cellData.v !== null) {
-          cell.value = cellData.v;
+        // Value / formula
+        if (cd.f) {
+          cell.value = { formula: cd.f, result: cd.v };
+        } else if (cd.v !== undefined && cd.v !== null) {
+          cell.value = cd.v;
         }
 
-        if (cellData.s) {
-          const s = cellData.s;
-          cell.font = {
-            bold: !!s.bl,
-            italic: !!s.it,
-            size: s.fs || 11,
-            color: s.fc ? { argb: cssToArgb(s.fc) } : undefined,
-          };
-          if (s.bg) {
-            cell.fill = {
-              type: 'pattern',
-              pattern: 'solid',
-              fgColor: { argb: cssToArgb(s.bg) },
-            };
-          }
-          if (s.ht !== undefined) {
-            cell.alignment = {
-              horizontal: ['center', 'left', 'right'][s.ht] || 'left',
-              wrapText: s.tb === 2,
-            };
-          }
+        // Font
+        const fontStyle = {};
+        if (cd.bl) fontStyle.bold = true;
+        if (cd.it) fontStyle.italic = true;
+        if (cd.un) fontStyle.underline = true;
+        if (cd.fs) fontStyle.size = cd.fs;
+        if (cd.ff) fontStyle.name = cd.ff;
+        if (cd.fc) fontStyle.color = { argb: cssToArgb(cd.fc) };
+        if (Object.keys(fontStyle).length) cell.font = fontStyle;
+
+        // Background
+        if (cd.bg) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: cssToArgb(cd.bg) } };
         }
+
+        // Alignment
+        const alignStyle = {};
+        if (cd.ht !== undefined) alignStyle.horizontal = ['center', 'left', 'right'][cd.ht] || 'left';
+        if (cd.vt !== undefined) alignStyle.vertical = ['middle', 'top', 'bottom'][cd.vt] || 'middle';
+        if (cd.tb === 2) alignStyle.wrapText = true;
+        if (Object.keys(alignStyle).length) cell.alignment = alignStyle;
+
+        // Borders
+        if (cd.bd) {
+          const border = {};
+          const toBorder = (b) => b ? { style: b.style === '2' ? 'medium' : 'thin', color: { argb: cssToArgb(b.color) } } : undefined;
+          if (cd.bd.t) border.top = toBorder(cd.bd.t);
+          if (cd.bd.b) border.bottom = toBorder(cd.bd.b);
+          if (cd.bd.l) border.left = toBorder(cd.bd.l);
+          if (cd.bd.r) border.right = toBorder(cd.bd.r);
+          cell.border = border;
+        }
+
+        // Number format
+        if (cd.fm) cell.numFmt = cd.fm;
       });
     }
 
-    // Apply merges
+    // Merges
     if (sheet.merges) {
       Object.values(sheet.merges).forEach(({ r, c, rs, cs }) => {
         if (rs > 1 || cs > 1) {
-          worksheet.mergeCells(r + 1, c + 1, r + rs, c + cs);
+          try {
+            worksheet.mergeCells(r + 1, c + 1, r + rs, c + cs);
+          } catch {
+            // skip conflicting merges
+          }
         }
       });
     }

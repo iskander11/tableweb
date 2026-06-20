@@ -7,12 +7,59 @@ import { authenticate } from '../middleware/auth.js';
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-// Import Excel into existing spreadsheet
-router.post('/:id/import', authenticate, upload.single('file'), async (req, res) => {
-  try {
-    const sheets = await importExcel(req.file.buffer);
+// Import progress via SSE — client subscribes before uploading
+// GET /api/excel/:id/import-progress?jobId=xxx
+const activeJobs = new Map(); // jobId -> { progress, done, error, clients[] }
 
-    // Clear existing sheets data and replace with imported
+router.get('/:id/import-progress', authenticate, (req, res) => {
+  const { jobId } = req.query;
+  if (!jobId) return res.status(400).json({ error: 'jobId required' });
+
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders();
+
+  const sendEvent = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  if (!activeJobs.has(jobId)) {
+    activeJobs.set(jobId, { progress: 0, done: false, error: null, clients: [] });
+  }
+  const job = activeJobs.get(jobId);
+  job.clients.push(sendEvent);
+
+  // Send current progress immediately
+  sendEvent({ progress: job.progress, done: job.done, error: job.error });
+
+  req.on('close', () => {
+    const j = activeJobs.get(jobId);
+    if (j) j.clients = j.clients.filter((c) => c !== sendEvent);
+  });
+});
+
+// POST /api/excel/:id/import?jobId=xxx
+router.post('/:id/import', authenticate, upload.single('file'), async (req, res) => {
+  const { jobId } = req.query;
+
+  const updateProgress = (pct) => {
+    if (!jobId) return;
+    const job = activeJobs.get(jobId);
+    if (!job) return;
+    job.progress = pct;
+    job.clients.forEach((send) => send({ progress: pct, done: false }));
+  };
+
+  try {
+    if (jobId && !activeJobs.has(jobId)) {
+      activeJobs.set(jobId, { progress: 0, done: false, error: null, clients: [] });
+    }
+
+    updateProgress(5);
+    const sheets = await importExcel(req.file.buffer, updateProgress);
+    updateProgress(90);
+
     await query('DELETE FROM spreadsheet_data WHERE spreadsheet_id = $1', [req.params.id]);
 
     for (let i = 0; i < sheets.length; i++) {
@@ -23,13 +70,31 @@ router.post('/:id/import', authenticate, upload.single('file'), async (req, res)
     }
     await query('UPDATE spreadsheets SET updated_at = NOW() WHERE id = $1', [req.params.id]);
 
+    updateProgress(100);
+    if (jobId) {
+      const job = activeJobs.get(jobId);
+      if (job) {
+        job.done = true;
+        job.clients.forEach((send) => send({ progress: 100, done: true }));
+        // cleanup after 30s
+        setTimeout(() => activeJobs.delete(jobId), 30000);
+      }
+    }
+
     res.json({ success: true, sheets: sheets.length });
   } catch (err) {
+    if (jobId) {
+      const job = activeJobs.get(jobId);
+      if (job) {
+        job.error = err.message;
+        job.clients.forEach((send) => send({ progress: 0, done: true, error: err.message }));
+      }
+    }
     res.status(500).json({ error: err.message });
   }
 });
 
-// Export spreadsheet to Excel
+// Export to Excel
 router.get('/:id/export', authenticate, async (req, res) => {
   try {
     const { rows: dataRows } = await query(
