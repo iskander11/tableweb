@@ -3,6 +3,13 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    'process.env': {},
+    global: 'globalThis',
+  },
+  optimizeDeps: {
+    include: ['@fortune-sheet/core', '@fortune-sheet/react'],
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:3001',
