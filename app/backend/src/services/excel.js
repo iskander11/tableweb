@@ -38,14 +38,20 @@ const formatDate = (date, numFmt) => {
 
   if (!numFmt) return `${dd}.${mm}.${yy}`;
 
-  return numFmt
+  // Excel numFmt can have multiple sections separated by ";" (positive;negative;zero;text)
+  // Take only the first section (for positive numbers / dates)
+  const fmt = numFmt.split(';')[0]
+    .replace(/\[.*?\]/g, '')   // remove locale brackets like [$-419]
+    .replace(/\\./, '')         // remove escaped chars
+    .trim();
+
+  return fmt
     .replace(/yyyy/gi, yyyy)
     .replace(/yy/gi, yy)
     .replace(/dd/gi, dd)
     .replace(/mm/gi, mm)
     .replace(/hh/gi, hh)
-    .replace(/ss/gi, '00')
-    .replace(/\[.*?\]/g, ''); // remove locale brackets like [h]
+    .replace(/ss/gi, '00');
 };
 
 export async function importExcel(buffer, onProgress) {
