@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken';
 
 export const authenticate = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
+  // Support token in query param for SSE (EventSource doesn't support custom headers)
+  const token = req.headers.authorization?.split(' ')[1] || req.query.token;
   if (!token) return res.status(401).json({ error: 'No token' });
 
   try {
