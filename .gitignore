@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+backups/
+*.zip
+keys/
+vps/
+access_token_github.txt
