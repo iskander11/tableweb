@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { io, Socket } from 'socket.io-client';
 import { Workbook } from '@fortune-sheet/react';
 import '@fortune-sheet/react/dist/index.css';
@@ -16,10 +16,28 @@ interface ImportState {
   error: string | null;
 }
 
+function buildSheets(sheetMeta: any) {
+  return (sheetMeta.sheets || []).map((s: any, i: number) => {
+    const data = s.data || {};
+    return {
+      name: data.name || `Sheet${i + 1}`,
+      index: i,
+      status: 1,
+      celldata: flattenCells(data.cells || {}),
+      config: {
+        columnlen: numericKeys(data.columnWidths || {}),
+        rowlen: numericKeys(data.rowHeights || {}),
+        merge: data.merges || {},
+      },
+    };
+  });
+}
+
 export default function SheetPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { user, token, isEditor } = useAuth();
+  const { token, isEditor } = useAuth();
+  const qc = useQueryClient();
   const socketRef = useRef<Socket | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [sheets, setSheets] = useState<any[]>([]);
@@ -33,42 +51,27 @@ export default function SheetPage() {
 
   useEffect(() => {
     if (!sheetMeta) return;
-
-    const initialSheets = (sheetMeta.sheets || []).map((s: any, i: number) => ({
-      name: s.data?.name || `Sheet${i + 1}`,
-      index: i,
-      status: 1,
-      celldata: flattenCells(s.data?.cells || {}),
-      config: {
-        columnlen: s.data?.columnWidths || {},
-        rowlen: s.data?.rowHeights || {},
-        merge: s.data?.merges || {},
-      },
-    }));
-    setSheets(initialSheets.length ? initialSheets : [{ name: 'Sheet1', index: 0, status: 1, celldata: [] }]);
+    const built = buildSheets(sheetMeta);
+    setSheets(built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }]);
   }, [sheetMeta]);
 
   useEffect(() => {
+    if (!token) return;
     const socket = io('/', { auth: { token } });
     socketRef.current = socket;
-
     socket.emit('join-sheet', id);
     socket.on('room-users', setOnlineUsers);
     socket.on('cell-change', ({ changes }) => {
       workbookRef.current?.applyOp?.(changes);
     });
-
     return () => { socket.disconnect(); };
   }, [id, token]);
 
-  const handleCellChange = useCallback((op: any) => {
-    socketRef.current?.emit('cell-change', { sheetId: id, changes: op });
-  }, [id]);
-
   const handleSave = useCallback((data: any) => {
+    if (!data) return;
     socketRef.current?.emit('save-sheet', {
       sheetId: id,
-      sheetIndex: data.index || 0,
+      sheetIndex: data.index ?? 0,
       data: {
         name: data.name,
         cells: unflattenCells(data.celldata || []),
@@ -78,6 +81,13 @@ export default function SheetPage() {
       },
     });
   }, [id]);
+
+  const handleChange = useCallback((allSheets: any) => {
+    if (!isEditor() || !allSheets?.length) return;
+    const active = allSheets[0];
+    socketRef.current?.emit('cell-change', { sheetId: id, changes: allSheets });
+    handleSave(active);
+  }, [id, isEditor, handleSave]);
 
   const handleExport = async () => {
     const res = await api.get(`/excel/${id}/export`, { responseType: 'blob' });
@@ -95,22 +105,28 @@ export default function SheetPage() {
     e.target.value = '';
 
     const jobId = `job_${Date.now()}`;
-    setImportState({ active: true, progress: 0, error: null });
+    setImportState({ active: true, progress: 2, error: null });
 
-    // Subscribe to progress via SSE
-    const evtSource = new EventSource(`/api/excel/${id}/import-progress?jobId=${jobId}`, {});
+    // SSE: token as query param since EventSource doesn't support headers
+    const evtSource = new EventSource(
+      `/api/excel/${id}/import-progress?jobId=${jobId}&token=${encodeURIComponent(token || '')}`
+    );
+
     evtSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      setImportState((s) => ({ ...s, progress: data.progress }));
-      if (data.done) {
-        evtSource.close();
-        if (data.error) {
-          setImportState({ active: false, progress: 0, error: data.error });
-        } else {
-          // Reload page to get fresh data from server
-          setTimeout(() => window.location.reload(), 300);
+      try {
+        const data = JSON.parse(event.data);
+        setImportState((s) => ({ ...s, progress: data.progress }));
+        if (data.done) {
+          evtSource.close();
+          if (data.error) {
+            setImportState({ active: false, progress: 0, error: data.error });
+          } else {
+            // Refresh sheet data and update Workbook without page reload
+            qc.invalidateQueries({ queryKey: ['sheet', id] });
+            setImportState({ active: false, progress: 0, error: null });
+          }
         }
-      }
+      } catch { /* ignore parse errors */ }
     };
     evtSource.onerror = () => evtSource.close();
 
@@ -125,28 +141,26 @@ export default function SheetPage() {
   };
 
   if (!sheets.length) {
-    return (
-      <div className="flex items-center justify-center h-screen text-gray-400">
-        Загрузка таблицы...
-      </div>
-    );
+    return <div className="flex items-center justify-center h-screen text-gray-400">Загрузка...</div>;
   }
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className="flex flex-col h-screen bg-white">
       {/* Import progress overlay */}
       {importState.active && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">
           <div className="bg-white rounded-2xl shadow-xl p-8 w-80">
-            <h3 className="font-semibold text-gray-800 mb-4 text-center">Импорт файла</h3>
-            <div className="w-full bg-gray-100 rounded-full h-3 mb-3">
+            <h3 className="font-semibold text-gray-800 mb-4 text-center">Импорт файла Excel</h3>
+            <div className="w-full bg-gray-100 rounded-full h-3 mb-3 overflow-hidden">
               <div
-                className="bg-blue-500 h-3 rounded-full transition-all duration-300"
+                className="bg-blue-500 h-3 rounded-full transition-all duration-200"
                 style={{ width: `${importState.progress}%` }}
               />
             </div>
             <p className="text-center text-sm text-gray-500">
-              {importState.progress < 100 ? `${importState.progress}% — обработка...` : 'Сохранение...'}
+              {importState.progress < 95
+                ? `${importState.progress}% — обработка ячеек...`
+                : 'Сохранение в базу данных...'}
             </p>
           </div>
         </div>
@@ -154,18 +168,15 @@ export default function SheetPage() {
 
       {/* Error toast */}
       {importState.error && (
-        <div className="fixed top-4 right-4 z-50 bg-red-50 border border-red-200 rounded-xl px-4 py-3 shadow">
-          <p className="text-red-600 text-sm">{importState.error}</p>
-          <button
-            onClick={() => setImportState((s) => ({ ...s, error: null }))}
-            className="text-xs text-red-400 underline mt-1"
-          >
-            Закрыть
-          </button>
+        <div className="fixed top-4 right-4 z-50 bg-red-50 border border-red-200 rounded-xl px-4 py-3 shadow-lg max-w-sm">
+          <p className="text-red-600 text-sm font-medium">Ошибка импорта</p>
+          <p className="text-red-500 text-xs mt-1">{importState.error}</p>
+          <button onClick={() => setImportState((s) => ({ ...s, error: null }))}
+            className="text-xs text-red-400 underline mt-2 block">Закрыть</button>
         </div>
       )}
 
-      <header className="bg-white border-b px-4 py-2 flex items-center gap-3">
+      <header className="bg-white border-b px-4 py-2 flex items-center gap-3 shrink-0">
         <button onClick={() => navigate('/')} className="p-1 rounded hover:bg-gray-100">
           <ArrowLeft size={18} />
         </button>
@@ -180,14 +191,12 @@ export default function SheetPage() {
 
         {isEditor() && (
           <>
-            <label className="flex items-center gap-1 cursor-pointer text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
+            <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
               <Upload size={14} /> Импорт .xlsx
               <input type="file" accept=".xlsx,.xls" className="hidden" onChange={handleImport} />
             </label>
-            <button
-              onClick={handleExport}
-              className="flex items-center gap-1 text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50"
-            >
+            <button onClick={handleExport}
+              className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
               <Download size={14} /> Экспорт .xlsx
             </button>
           </>
@@ -198,19 +207,21 @@ export default function SheetPage() {
         <Workbook
           ref={workbookRef}
           data={sheets}
-          onChange={(data: any) => {
-            if (isEditor() && data?.length) {
-              handleCellChange(data);
-              handleSave(data[0]);
-            }
-          }}
+          onChange={handleChange}
           showToolbar={isEditor()}
-          showFormulaBar={true}
+          showFormulaBar
           allowEdit={isEditor()}
         />
       </div>
     </div>
   );
+}
+
+// FortuneSheet expects numeric keys in columnlen/rowlen
+function numericKeys(obj: Record<string, any>) {
+  const result: Record<number, any> = {};
+  Object.entries(obj).forEach(([k, v]) => { result[Number(k)] = v; });
+  return result;
 }
 
 function flattenCells(cells: Record<string, any>) {
@@ -223,7 +234,7 @@ function flattenCells(cells: Record<string, any>) {
 function unflattenCells(celldata: any[]) {
   const cells: Record<string, any> = {};
   (celldata || []).forEach(({ r, c, v }) => {
-    if (v !== undefined) cells[`${r}_${c}`] = v;
+    if (v !== undefined && v !== null) cells[`${r}_${c}`] = v;
   });
   return cells;
 }
