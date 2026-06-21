@@ -88,6 +88,9 @@ export default function SheetPage() {
   const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
+  const lastSavedSheetsRef = useRef<any[] | null>(null);
+  // FortuneSheet fires onChange once during init — ignore it
+  const initChangeCountRef = useRef(0);
   const { version: fontsVersion } = useFonts();
 
   const editor = isEditor();
@@ -105,7 +108,11 @@ export default function SheetPage() {
   useEffect(() => {
     if (!sheetMeta) return;
     const built = buildSheets(sheetMeta);
-    setSheets(built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }]);
+    const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
+    setSheets(data);
+    lastSavedSheetsRef.current = data;
+    initChangeCountRef.current = 0;
+    setIsDirty(false);
   }, [sheetMeta]);
 
   // Load changelog when panel opens
@@ -128,6 +135,34 @@ export default function SheetPage() {
     });
     return () => { socket.disconnect(); };
   }, [id, token]);
+
+  const buildSummary = useCallback((current: any[]): string => {
+    const prev = lastSavedSheetsRef.current;
+    if (!prev) return '';
+    let changedCount = 0;
+    const examples: string[] = [];
+    for (const sheet of current) {
+      const prevSheet = prev.find((s: any) => (s.index ?? s.name) === (sheet.index ?? sheet.name));
+      const currCells = cellsFromSheet(sheet);
+      const prevCells = prevSheet ? cellsFromSheet(prevSheet) : {};
+      const allKeys = new Set([...Object.keys(currCells), ...Object.keys(prevCells)]);
+      for (const key of allKeys) {
+        const cv = currCells[key]?.v ?? currCells[key]?.m ?? '';
+        const pv = prevCells[key]?.v ?? prevCells[key]?.m ?? '';
+        if (String(cv) !== String(pv)) {
+          changedCount++;
+          if (examples.length < 3) {
+            const [r, c] = key.split('_').map(Number);
+            const col = colName(c);
+            const val = String(cv).slice(0, 30);
+            examples.push(`${col}${r + 1}${val ? `="${val}"` : ' (удалено)'}`);
+          }
+        }
+      }
+    }
+    if (!changedCount) return '';
+    return `Изменено ячеек: ${changedCount}${examples.length ? ` (${examples.join(', ')})` : ''}`;
+  }, []);
 
   const saveAll = useCallback((allSheets: any[], summary?: string) => {
     (allSheets || []).forEach((s, i) => {
@@ -153,15 +188,22 @@ export default function SheetPage() {
 
   const handleSaveNow = useCallback(() => {
     const all = latestSheetsRef.current || sheets;
+    const summary = buildSummary(all);
     setSaveState('saving');
-    saveAll(all);
+    saveAll(all, summary);
+    lastSavedSheetsRef.current = all;
     setIsDirty(false);
     setSaveState('saved');
     setTimeout(() => setSaveState('idle'), 2000);
-  }, [saveAll, sheets]);
+  }, [saveAll, buildSummary, sheets]);
 
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;
+    // FortuneSheet fires onChange once on mount — skip the very first call
+    if (initChangeCountRef.current < 1) {
+      initChangeCountRef.current += 1;
+      return;
+    }
     latestSheetsRef.current = allSheets;
     setIsDirty(true);
     // Broadcast to other users for real-time collaboration (no auto-save)
@@ -429,6 +471,16 @@ export default function SheetPage() {
       </div>
     </div>
   );
+}
+
+function colName(c: number): string {
+  let name = '';
+  c += 1;
+  while (c > 0) {
+    name = String.fromCharCode(65 + ((c - 1) % 26)) + name;
+    c = Math.floor((c - 1) / 26);
+  }
+  return name;
 }
 
 function numericKeys(obj: Record<string, any>) {

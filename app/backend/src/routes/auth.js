@@ -106,6 +106,22 @@ router.patch('/users/:id/reactivate', authenticate, requireAdmin, async (req, re
   res.json({ success: true });
 });
 
+// Permanently delete user (admin only) — only allowed if user is inactive
+router.delete('/users/:id/permanent', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await query('SELECT is_active FROM users WHERE id = $1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Пользователь не найден' });
+    if (rows[0].is_active) return res.status(400).json({ error: 'Нельзя удалить активного пользователя' });
+    await query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'Нельзя удалить: у пользователя есть связанные данные (таблицы, история)' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Transfer admin role
 router.post('/transfer-admin', authenticate, requireAdmin, async (req, res) => {
   const { to_user_id } = req.body;

@@ -50,6 +50,12 @@ export default function AdminPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
   });
 
+  const permanentDeleteUser = useMutation({
+    mutationFn: (id: string) => api.delete(`/auth/users/${id}/permanent`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+    onError: (e: any) => alert(e.response?.data?.error || 'Не удалось удалить пользователя'),
+  });
+
   const changeRole = useMutation({
     mutationFn: ({ id, role }: { id: string; role: string }) => api.patch(`/auth/users/${id}/role`, { role }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
@@ -226,13 +232,25 @@ export default function AdminPage() {
                       <span className="text-gray-400 line-through text-sm">{u.username}</span>
                       <span className="text-xs text-gray-300 ml-2">{u.role}</span>
                     </div>
-                    <button
-                      onClick={() => reactivateUser.mutate({ id: u.id, role: u.role })}
-                      className="text-xs text-blue-600 hover:bg-blue-50 border border-blue-200 rounded px-2 py-0.5"
-                      title="Восстановить пользователя"
-                    >
-                      Восстановить
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => reactivateUser.mutate({ id: u.id, role: u.role })}
+                        className="text-xs text-blue-600 hover:bg-blue-50 border border-blue-200 rounded px-2 py-0.5"
+                        title="Восстановить пользователя"
+                      >
+                        Восстановить
+                      </button>
+                      <button
+                        onClick={() =>
+                          confirm(`Удалить ${u.username} НАВСЕГДА? Это действие нельзя отменить.`) &&
+                          permanentDeleteUser.mutate(u.id)
+                        }
+                        className="p-1 text-red-400 hover:bg-red-50 rounded"
+                        title="Удалить навсегда"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
