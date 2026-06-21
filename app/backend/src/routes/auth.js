@@ -138,6 +138,28 @@ router.post('/transfer-admin', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// Change own password
+router.patch('/password', authenticate, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: 'Укажите текущий и новый пароль' });
+  }
+  if (newPassword.length < 4) {
+    return res.status(400).json({ error: 'Новый пароль должен быть не менее 4 символов' });
+  }
+  try {
+    const { rows } = await query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Пользователь не найден' });
+    const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!valid) return res.status(401).json({ error: 'Неверный текущий пароль' });
+    const hash = await bcrypt.hash(newPassword, 12);
+    await query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.user.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get current user
 router.get('/me', authenticate, async (req, res) => {
   const { rows } = await query(

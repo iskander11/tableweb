@@ -1,9 +1,88 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Pencil, Trash2, Lock, Archive, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, Pencil, Trash2, Lock, Archive, ChevronLeft, ChevronRight, KeyRound, X } from 'lucide-react';
 import api from '../api/client';
 import { useAuth } from '../store/auth';
+
+function ChangePasswordModal({ onClose }: { onClose: () => void }) {
+  const [form, setForm] = useState({ current: '', next: '', confirm: '' });
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
+
+  const mutation = useMutation({
+    mutationFn: () => api.patch('/auth/password', { currentPassword: form.current, newPassword: form.next }),
+    onSuccess: () => { setSuccess(true); setError(''); },
+    onError: (e: any) => setError(e.response?.data?.error || 'Не удалось сменить пароль'),
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (form.next !== form.confirm) { setError('Новые пароли не совпадают'); return; }
+    if (form.next.length < 4) { setError('Пароль должен быть не менее 4 символов'); return; }
+    mutation.mutate();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center px-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="font-semibold text-gray-800 flex items-center gap-2">
+            <KeyRound size={16} /> Смена пароля
+          </h2>
+          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 text-gray-400">
+            <X size={18} />
+          </button>
+        </div>
+
+        {success ? (
+          <div className="text-center py-4">
+            <p className="text-green-600 font-medium mb-4">Пароль успешно изменён</p>
+            <button onClick={onClose} className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm hover:bg-blue-700 transition">
+              Закрыть
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <input
+              type="password"
+              placeholder="Текущий пароль"
+              value={form.current}
+              onChange={(e) => setForm((f) => ({ ...f, current: e.target.value }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
+              required
+            />
+            <input
+              type="password"
+              placeholder="Новый пароль"
+              value={form.next}
+              onChange={(e) => setForm((f) => ({ ...f, next: e.target.value }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
+              required
+            />
+            <input
+              type="password"
+              placeholder="Повторите новый пароль"
+              value={form.confirm}
+              onChange={(e) => setForm((f) => ({ ...f, confirm: e.target.value }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
+              required
+            />
+            {error && <p className="text-red-500 text-sm">{error}</p>}
+            <button
+              type="submit"
+              disabled={mutation.isPending}
+              className="w-full bg-blue-600 text-white rounded-lg py-2.5 font-medium hover:bg-blue-700 disabled:opacity-50 transition"
+            >
+              {mutation.isPending ? 'Сохранение…' : 'Сменить пароль'}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
 
 interface Spreadsheet {
   id: string;
@@ -26,6 +105,7 @@ export default function DashboardPage() {
   const [renameName, setRenameName] = useState('');
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
   const { data: sheets = [] } = useQuery<Spreadsheet[]>({
     queryKey: ['sheets'],
@@ -72,10 +152,26 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
+
       <header className="bg-white border-b px-4 sm:px-6 py-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">TableWeb</h1>
         <div className="flex items-center gap-3 sm:gap-4">
-          <span className="text-sm text-gray-600 hidden sm:inline">{user?.username}</span>
+          <button
+            onClick={() => setShowChangePassword(true)}
+            className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-800 hidden sm:flex"
+            title="Сменить пароль"
+          >
+            <span className="hidden md:inline">{user?.username}</span>
+            <KeyRound size={14} />
+          </button>
+          <button
+            onClick={() => setShowChangePassword(true)}
+            className="p-1.5 rounded hover:bg-gray-100 text-gray-500 sm:hidden"
+            title="Сменить пароль"
+          >
+            <KeyRound size={16} />
+          </button>
           {isAdmin() && (
             <button onClick={() => navigate('/admin')} className="text-sm text-blue-600 hover:underline">
               Настройки
