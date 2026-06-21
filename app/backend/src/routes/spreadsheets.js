@@ -30,8 +30,13 @@ router.get('/', authenticate, async (req, res) => {
 
 // Create spreadsheet
 router.post('/', authenticate, async (req, res) => {
-  const { name } = req.body;
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Введите название таблицы' });
   try {
+    const dup = await query('SELECT 1 FROM spreadsheets WHERE LOWER(name) = LOWER($1)', [name]);
+    if (dup.rows.length) {
+      return res.status(409).json({ error: 'Таблица с таким названием уже существует' });
+    }
     const { rows } = await query(
       'INSERT INTO spreadsheets (name, created_by) VALUES ($1, $2) RETURNING *',
       [name, req.user.id]
@@ -86,11 +91,20 @@ router.get('/:id', authenticate, async (req, res) => {
 
 // Rename spreadsheet
 router.patch('/:id/rename', authenticate, async (req, res) => {
-  const { name } = req.body;
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Введите название таблицы' });
   const { rows: [sheet] } = await query('SELECT * FROM spreadsheets WHERE id = $1', [req.params.id]);
   if (!sheet) return res.status(404).json({ error: 'Not found' });
   if (sheet.created_by !== req.user.id && req.user.role !== 'admin')
     return res.status(403).json({ error: 'Forbidden' });
+
+  const dup = await query(
+    'SELECT 1 FROM spreadsheets WHERE LOWER(name) = LOWER($1) AND id <> $2',
+    [name, req.params.id]
+  );
+  if (dup.rows.length) {
+    return res.status(409).json({ error: 'Таблица с таким названием уже существует' });
+  }
 
   await query('UPDATE spreadsheets SET name = $1, updated_at = NOW() WHERE id = $2', [name, req.params.id]);
   res.json({ success: true });

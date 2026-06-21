@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import compression from 'compression';
 import dotenv from 'dotenv';
 import cron from 'node-cron';
 import jwt from 'jsonwebtoken';
@@ -10,6 +11,7 @@ import authRoutes from './routes/auth.js';
 import spreadsheetRoutes from './routes/spreadsheets.js';
 import excelRoutes from './routes/excel.js';
 import backupRoutes from './routes/backup.js';
+import fontRoutes, { ensureFontsTable, FONTS_DIR } from './routes/fonts.js';
 import { query } from './db/index.js';
 import { exportExcel } from './services/excel.js';
 import { createWriteStream, mkdirSync } from 'fs';
@@ -26,12 +28,19 @@ const io = new Server(httpServer, {
 });
 
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
+app.use(compression());
 app.use(express.json({ limit: '50mb' }));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/spreadsheets', spreadsheetRoutes);
 app.use('/api/excel', excelRoutes);
 app.use('/api/backup', backupRoutes);
+// Serve font files without auth so the browser font loader can fetch them.
+// Registered before the /api/fonts router so the static path takes priority.
+app.use('/api/fonts/files', express.static(FONTS_DIR, { maxAge: '7d', immutable: true }));
+app.use('/api/fonts', fontRoutes);
+
+ensureFontsTable().catch((err) => console.error('fonts table init failed:', err));
 
 // Track online users per spreadsheet room
 const roomUsers = {};

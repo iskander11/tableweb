@@ -32,15 +32,35 @@ router.post('/login', async (req, res) => {
 // Create user (admin only)
 router.post('/users', authenticate, requireAdmin, async (req, res) => {
   const { username, password, role } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Логин и пароль обязательны' });
+  }
+  if (username.length < 2 || username.length > 50) {
+    return res.status(400).json({ error: 'Логин должен быть от 2 до 50 символов' });
+  }
+  if (password.length < 4) {
+    return res.status(400).json({ error: 'Пароль должен быть не менее 4 символов' });
+  }
   try {
+    const existing = await query(
+      'SELECT 1 FROM users WHERE LOWER(username) = LOWER($1)',
+      [username.trim()]
+    );
+    if (existing.rows.length) {
+      return res.status(409).json({ error: `Пользователь «${username.trim()}» уже существует` });
+    }
+    const trimmed = username.trim();
     const hash = await bcrypt.hash(password, 12);
     const { rows } = await query(
       'INSERT INTO users (username, email, password_hash, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, username, role',
-      [username, `${username}@tableweb.local`, hash, role || 'reader', req.user.id]
+      [trimmed, `${trimmed}@tableweb.local`, hash, role || 'reader', req.user.id]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    if (err.code === '23505') {
+      return res.status(409).json({ error: `Пользователь «${username.trim()}» уже существует` });
+    }
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });
 

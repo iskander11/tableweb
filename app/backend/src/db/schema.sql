@@ -50,6 +50,25 @@ CREATE TABLE IF NOT EXISTS backups (
   size_bytes BIGINT
 );
 
+-- Custom fonts uploaded by admins (for faithful Excel rendering + toolbar picker)
+CREATE TABLE IF NOT EXISTS fonts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  display_name VARCHAR(120) NOT NULL,
+  family_name  VARCHAR(120) NOT NULL,
+  filename     VARCHAR(200) NOT NULL,
+  format       VARCHAR(20)  NOT NULL,
+  uploaded_by  UUID REFERENCES users(id),
+  created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Performance indexes
+CREATE INDEX IF NOT EXISTS idx_spreadsheet_data_sheet_id ON spreadsheet_data(spreadsheet_id);
+CREATE INDEX IF NOT EXISTS idx_spreadsheet_permissions_sheet_id ON spreadsheet_permissions(spreadsheet_id);
+CREATE INDEX IF NOT EXISTS idx_spreadsheet_permissions_user_id ON spreadsheet_permissions(user_id);
+CREATE INDEX IF NOT EXISTS idx_users_username_lower ON users(LOWER(username));
+CREATE INDEX IF NOT EXISTS idx_spreadsheets_created_by ON spreadsheets(created_by);
+CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at DESC);
+
 -- Admin transfer log
 CREATE TABLE IF NOT EXISTS admin_transfers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

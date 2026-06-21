@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import archiver from 'archiver';
-import { exportExcel } from '../services/excel.js';
+import AdmZip from 'adm-zip';
+import { exportExcel, importExcel } from '../services/excel.js';
 import { query } from '../db/index.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
-import { createWriteStream, mkdirSync } from 'fs';
+import { createWriteStream, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 const router = Router();
@@ -14,6 +15,9 @@ mkdirSync(BACKUP_DIR, { recursive: true });
 router.post('/all', authenticate, requireAdmin, async (req, res) => {
   try {
     const { rows: sheets } = await query('SELECT * FROM spreadsheets');
+    if (sheets.length === 0) {
+      return res.status(400).json({ error: 'В системе нет таблиц — бэкап недоступен' });
+    }
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `backup-all-${timestamp}.zip`;
     const filepath = join(BACKUP_DIR, filename);
@@ -54,6 +58,74 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
      LEFT JOIN users u ON b.created_by = u.id ORDER BY b.created_at DESC`
   );
   res.json(rows);
+});
+
+// Download a backup zip
+router.get('/:id/download', authenticate, requireAdmin, async (req, res) => {
+  const { rows: [bk] } = await query('SELECT * FROM backups WHERE id = $1', [req.params.id]);
+  if (!bk) return res.status(404).json({ error: 'Бэкап не найден' });
+  const filepath = join(BACKUP_DIR, bk.filename);
+  if (!existsSync(filepath)) return res.status(404).json({ error: 'Файл бэкапа отсутствует на диске' });
+  res.download(filepath, bk.filename);
+});
+
+// Delete a backup (file + record)
+router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
+  const { rows: [bk] } = await query('SELECT * FROM backups WHERE id = $1', [req.params.id]);
+  if (bk) {
+    const filepath = join(BACKUP_DIR, bk.filename);
+    if (existsSync(filepath)) { try { unlinkSync(filepath); } catch { /* ignore */ } }
+  }
+  await query('DELETE FROM backups WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
+});
+
+// Restore a backup into the system: each .xlsx becomes a spreadsheet
+router.post('/:id/restore', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { rows: [bk] } = await query('SELECT * FROM backups WHERE id = $1', [req.params.id]);
+    if (!bk) return res.status(404).json({ error: 'Бэкап не найден' });
+    const filepath = join(BACKUP_DIR, bk.filename);
+    if (!existsSync(filepath)) return res.status(404).json({ error: 'Файл бэкапа отсутствует на диске' });
+
+    const zip = new AdmZip(filepath);
+    const entries = zip.getEntries().filter((e) => !e.isDirectory && /\.xlsx$/i.test(e.entryName));
+    if (entries.length === 0) return res.status(400).json({ error: 'В бэкапе нет таблиц' });
+
+    let restored = 0;
+    for (const entry of entries) {
+      const baseName = entry.entryName.replace(/\.xlsx$/i, '').split('/').pop();
+
+      // Avoid duplicate names: append a suffix if needed
+      let name = baseName;
+      let n = 1;
+      // eslint-disable-next-line no-await-in-loop
+      while ((await query('SELECT 1 FROM spreadsheets WHERE LOWER(name) = LOWER($1)', [name])).rows.length) {
+        name = `${baseName} (восстановлено${n > 1 ? ' ' + n : ''})`;
+        n += 1;
+      }
+
+      // eslint-disable-next-line no-await-in-loop
+      const sheets = await importExcel(entry.getData());
+      // eslint-disable-next-line no-await-in-loop
+      const { rows: [created] } = await query(
+        'INSERT INTO spreadsheets (name, created_by) VALUES ($1, $2) RETURNING id',
+        [name, req.user.id]
+      );
+      for (let i = 0; i < sheets.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await query(
+          'INSERT INTO spreadsheet_data (spreadsheet_id, sheet_index, data) VALUES ($1, $2, $3)',
+          [created.id, i, JSON.stringify(sheets[i])]
+        );
+      }
+      restored += 1;
+    }
+
+    res.json({ success: true, restored });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;

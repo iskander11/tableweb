@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Pencil, Trash2, Lock, ArchiveRestore } from 'lucide-react';
+import { Plus, Pencil, Trash2, Lock, Archive } from 'lucide-react';
 import api from '../api/client';
 import { useAuth } from '../store/auth';
 
@@ -19,6 +19,7 @@ export default function DashboardPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [newName, setNewName] = useState('');
+  const [createError, setCreateError] = useState('');
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameName, setRenameName] = useState('');
 
@@ -29,7 +30,8 @@ export default function DashboardPage() {
 
   const createMutation = useMutation({
     mutationFn: (name: string) => api.post('/spreadsheets', { name }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sheets'] }); setNewName(''); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sheets'] }); setNewName(''); setCreateError(''); },
+    onError: (e: any) => setCreateError(e.response?.data?.error || 'Не удалось создать таблицу'),
   });
 
   const deleteMutation = useMutation({
@@ -41,46 +43,54 @@ export default function DashboardPage() {
     mutationFn: ({ id, name }: { id: string; name: string }) =>
       api.patch(`/spreadsheets/${id}/rename`, { name }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['sheets'] }); setRenameId(null); },
+    onError: (e: any) => alert(e.response?.data?.error || 'Не удалось переименовать'),
   });
 
-  const backupAll = () => api.post('/backup/all').then(() => alert('Резервная копия создана!'));
+  const toggleBackup = useMutation({
+    mutationFn: (id: string) => api.patch(`/spreadsheets/${id}/backup-toggle`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['sheets'] }),
+  });
+
+  const submitCreate = () => {
+    const name = newName.trim();
+    if (!name) { setCreateError('Введите название таблицы'); return; }
+    createMutation.mutate(name);
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b px-6 py-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">TableWeb</h1>
         <div className="flex items-center gap-4">
-          <span className="text-sm text-gray-600">{user?.username} ({user?.role})</span>
+          <span className="text-sm text-gray-600">{user?.username}</span>
           {isAdmin() && (
-            <>
-              <button onClick={() => navigate('/admin')} className="text-sm text-blue-600 hover:underline">
-                Настройки
-              </button>
-              <button onClick={backupAll} className="flex items-center gap-1 text-sm text-green-600 hover:underline">
-                <ArchiveRestore size={14} /> Бэкап всех таблиц
-              </button>
-            </>
+            <button onClick={() => navigate('/admin')} className="text-sm text-blue-600 hover:underline">
+              Настройки
+            </button>
           )}
           <button onClick={logout} className="text-sm text-red-500 hover:underline">Выйти</button>
         </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
-        <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-center gap-3 mb-1">
           <input
             value={newName}
-            onChange={(e) => setNewName(e.target.value)}
+            onChange={(e) => { setNewName(e.target.value); if (createError) setCreateError(''); }}
             placeholder="Название новой таблицы..."
             className="border border-gray-300 rounded-lg px-3 py-2 flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            onKeyDown={(e) => e.key === 'Enter' && newName && createMutation.mutate(newName)}
+            onKeyDown={(e) => e.key === 'Enter' && submitCreate()}
           />
           <button
-            onClick={() => newName && createMutation.mutate(newName)}
-            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition"
+            onClick={submitCreate}
+            disabled={createMutation.isPending}
+            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
           >
             <Plus size={16} /> Создать
           </button>
         </div>
+        {createError && <p className="text-red-500 text-sm mb-4">{createError}</p>}
+        {!createError && <div className="mb-6" />}
 
         <div className="space-y-2">
           {sheets.map((sheet) => (
@@ -111,6 +121,13 @@ export default function DashboardPage() {
                 )}
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => toggleBackup.mutate(sheet.id)}
+                  className={`p-1.5 rounded transition ${sheet.backup_enabled ? 'text-green-600 bg-green-50 hover:bg-green-100' : 'text-gray-400 hover:bg-gray-100'}`}
+                  title={sheet.backup_enabled ? 'Автобэкап включён (нажмите чтобы выключить)' : 'Включить автобэкап'}
+                >
+                  <Archive size={15} />
+                </button>
                 <button
                   onClick={() => { setRenameId(sheet.id); setRenameName(sheet.name); }}
                   className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
