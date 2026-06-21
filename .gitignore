@@ -6,3 +6,5 @@ backups/
 keys/
 vps/
 access_token_github.txt
+__pycache__/
+*.pyc
