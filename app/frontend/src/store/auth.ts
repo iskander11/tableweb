@@ -34,6 +34,17 @@ export const useAuth = create<AuthStore>()(
       isAdmin: () => get().user?.role === 'admin',
       isEditor: () => ['admin', 'editor'].includes(get().user?.role ?? ''),
     }),
-    { name: 'auth-store', partialize: (s) => ({ user: s.user, token: s.token }) }
+    {
+      name: 'auth-store',
+      partialize: (s) => ({ user: s.user, token: s.token }),
+      onRehydrateStorage: () => (state) => {
+        // Keep localStorage['token'] in sync with Zustand after hydration
+        if (state?.token) {
+          localStorage.setItem('token', state.token);
+        } else {
+          localStorage.removeItem('token');
+        }
+      },
+    }
   )
 );

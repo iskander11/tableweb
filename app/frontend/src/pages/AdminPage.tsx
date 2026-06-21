@@ -28,10 +28,11 @@ export default function AdminPage() {
   const [fontName, setFontName] = useState('');
   const [fontError, setFontError] = useState('');
 
-  const { data: users = [] } = useQuery<User[]>({
+  const { data: usersRaw } = useQuery<User[]>({
     queryKey: ['users'],
     queryFn: () => api.get('/auth/users').then((r) => r.data),
   });
+  const users: User[] = Array.isArray(usersRaw) ? usersRaw : [];
 
   const createUser = useMutation({
     mutationFn: () => api.post('/auth/users', form),
