@@ -447,40 +447,47 @@ export default function SheetPage() {
           />
         </div>
 
-        {/* History sidebar */}
+        {/* History sidebar — overlay on mobile, sidebar on desktop */}
         {showHistory && (
-          <div className="w-64 sm:w-72 border-l bg-white flex flex-col shrink-0 overflow-hidden">
-            <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
-              <span className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
-                <History size={14} /> История изменений
-              </span>
-              <button onClick={() => setShowHistory(false)} className="p-1 rounded hover:bg-gray-100 text-gray-400">
-                <X size={14} />
-              </button>
+          <>
+            {/* Mobile backdrop */}
+            <div
+              className="fixed inset-0 bg-black/30 z-20 sm:hidden"
+              onClick={() => setShowHistory(false)}
+            />
+            <div className="fixed right-0 top-0 bottom-0 w-80 max-w-[90vw] z-30 sm:static sm:z-auto sm:w-72 sm:max-w-none border-l bg-white flex flex-col shrink-0 overflow-hidden shadow-xl sm:shadow-none">
+              <div className="flex items-center justify-between px-3 py-3 border-b shrink-0">
+                <span className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
+                  <History size={14} /> История изменений
+                </span>
+                <button onClick={() => setShowHistory(false)} className="p-1.5 rounded hover:bg-gray-100 text-gray-400">
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {changelog.length === 0 ? (
+                  <p className="text-xs text-gray-400 text-center py-8 px-3">Изменений пока нет</p>
+                ) : (
+                  <ul className="divide-y">
+                    {changelog.map((e, i) => (
+                      <li key={i} className="px-3 py-3">
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold shrink-0">
+                            {e.username[0].toUpperCase()}
+                          </span>
+                          <span className="text-sm font-medium text-gray-800 truncate">{e.username}</span>
+                        </div>
+                        {e.summary && (
+                          <p className="text-xs text-gray-600 mt-1 ml-7 break-words">{e.summary}</p>
+                        )}
+                        <p className="text-xs text-gray-400 mt-0.5 ml-7">{formatTime(e.saved_at)}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </div>
-            <div className="flex-1 overflow-y-auto">
-              {changelog.length === 0 ? (
-                <p className="text-xs text-gray-400 text-center py-8 px-3">Изменений пока нет</p>
-              ) : (
-                <ul className="divide-y">
-                  {changelog.map((e, i) => (
-                    <li key={i} className="px-3 py-2.5">
-                      <div className="flex items-center gap-1.5 mb-0.5">
-                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold shrink-0">
-                          {e.username[0].toUpperCase()}
-                        </span>
-                        <span className="text-sm font-medium text-gray-800 truncate">{e.username}</span>
-                      </div>
-                      {e.summary && (
-                        <p className="text-xs text-gray-600 mt-0.5 ml-6.5 break-words">{e.summary}</p>
-                      )}
-                      <p className="text-xs text-gray-400 mt-0.5 ml-6.5">{formatTime(e.saved_at)}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
+          </>
         )}
       </div>
     </div>

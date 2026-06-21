@@ -147,61 +147,65 @@ export default function AdminPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b px-6 py-4 flex items-center gap-3">
-        <button onClick={() => navigate('/')} className="p-1 rounded hover:bg-gray-100"><ArrowLeft size={18} /></button>
-        <h1 className="font-bold text-gray-800 text-lg">Настройки администратора</h1>
+      <header className="bg-white border-b px-4 sm:px-6 py-4 flex items-center gap-3">
+        <button onClick={() => navigate('/')} className="p-2 rounded hover:bg-gray-100 shrink-0"><ArrowLeft size={18} /></button>
+        <h1 className="font-bold text-gray-800 text-base sm:text-lg">Настройки администратора</h1>
       </header>
 
-      <main className="max-w-3xl mx-auto px-6 py-8 space-y-8">
+      <main className="max-w-3xl mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-6 sm:space-y-8">
         {/* Create user */}
-        <section className="bg-white rounded-xl border p-6">
+        <section className="bg-white rounded-xl border p-4 sm:p-6">
           <h2 className="font-semibold text-gray-700 mb-4 flex items-center gap-2"><UserPlus size={16} /> Создать пользователя</h2>
-          <div className="grid grid-cols-2 gap-3">
-            {(['username', 'password'] as const).map((field) => (
-              <input
-                key={field}
-                type={field === 'password' ? 'password' : 'text'}
-                placeholder={field === 'username' ? 'Логин' : 'Пароль'}
-                value={form[field]}
-                onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
-                className="border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            ))}
-            <select
-              value={form.role}
-              onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
-              className="border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="reader">Читатель</option>
-              <option value="editor">Редактор</option>
-            </select>
+          <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {(['username', 'password'] as const).map((field) => (
+                <input
+                  key={field}
+                  type={field === 'password' ? 'password' : 'text'}
+                  placeholder={field === 'username' ? 'Логин' : 'Пароль'}
+                  value={form[field]}
+                  onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
+                  className="border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
+                />
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <select
+                value={form.role}
+                onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
+                className="flex-1 border border-gray-300 rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
+              >
+                <option value="reader">Читатель</option>
+                <option value="editor">Редактор</option>
+              </select>
+              <button
+                onClick={() => { setUserError(''); createUser.mutate(); }}
+                disabled={createUser.isPending}
+                className="bg-blue-600 text-white px-5 py-2.5 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition text-sm font-medium shrink-0"
+              >
+                {createUser.isPending ? 'Создание…' : 'Создать'}
+              </button>
+            </div>
           </div>
-          <button
-            onClick={() => { setUserError(''); createUser.mutate(); }}
-            disabled={createUser.isPending}
-            className="mt-4 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition text-sm"
-          >
-            {createUser.isPending ? 'Создание…' : 'Создать'}
-          </button>
           {userError && <p className="text-red-500 text-sm mt-2">{userError}</p>}
         </section>
 
         {/* User list */}
-        <section className="bg-white rounded-xl border p-6">
+        <section className="bg-white rounded-xl border p-4 sm:p-6">
           <h2 className="font-semibold text-gray-700 mb-4">Пользователи</h2>
-          <div className="space-y-2">
+          <div className="space-y-1">
             {users.filter((u) => u.is_active).map((u) => (
-              <div key={u.id} className="flex items-center justify-between py-2 border-b last:border-0">
-                <div>
-                  <span className="font-medium text-gray-800">{u.username}</span>
-                  <span className="text-xs text-gray-400 ml-2">{u.role}</span>
+              <div key={u.id} className="flex items-center justify-between py-2.5 border-b last:border-0 gap-2">
+                <div className="min-w-0">
+                  <span className="font-medium text-gray-800 truncate block">{u.username}</span>
+                  <span className="text-xs text-gray-400">{u.role}</span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <select
                     value={u.role}
                     onChange={(e) => changeRole.mutate({ id: u.id, role: e.target.value })}
                     disabled={u.id === user?.id}
-                    className="text-sm border border-gray-200 rounded px-2 py-1"
+                    className="text-sm border border-gray-200 rounded px-2 py-1.5"
                   >
                     <option value="reader">Читатель</option>
                     <option value="editor">Редактор</option>
@@ -210,10 +214,10 @@ export default function AdminPage() {
                   {u.id !== user?.id && (
                     <button
                       onClick={() => confirm(`Деактивировать ${u.username}?`) && deleteUser.mutate(u.id)}
-                      className="p-1 text-red-400 hover:bg-red-50 rounded"
+                      className="p-1.5 text-red-400 hover:bg-red-50 rounded"
                       title="Деактивировать"
                     >
-                      <Trash2 size={14} />
+                      <Trash2 size={15} />
                     </button>
                   )}
                 </div>
@@ -227,15 +231,15 @@ export default function AdminPage() {
               <p className="text-xs text-gray-400 font-medium mb-2 uppercase tracking-wide">Деактивированные</p>
               <div className="space-y-1">
                 {users.filter((u) => !u.is_active).map((u) => (
-                  <div key={u.id} className="flex items-center justify-between py-1.5">
-                    <div>
-                      <span className="text-gray-400 line-through text-sm">{u.username}</span>
-                      <span className="text-xs text-gray-300 ml-2">{u.role}</span>
+                  <div key={u.id} className="flex items-center justify-between py-2 gap-2">
+                    <div className="min-w-0">
+                      <span className="text-gray-400 line-through text-sm truncate block">{u.username}</span>
+                      <span className="text-xs text-gray-300">{u.role}</span>
                     </div>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-2 shrink-0">
                       <button
                         onClick={() => reactivateUser.mutate({ id: u.id, role: u.role })}
-                        className="text-xs text-blue-600 hover:bg-blue-50 border border-blue-200 rounded px-2 py-0.5"
+                        className="text-xs text-blue-600 hover:bg-blue-50 border border-blue-200 rounded px-2.5 py-1"
                         title="Восстановить пользователя"
                       >
                         Восстановить
@@ -245,10 +249,10 @@ export default function AdminPage() {
                           confirm(`Удалить ${u.username} НАВСЕГДА? Это действие нельзя отменить.`) &&
                           permanentDeleteUser.mutate(u.id)
                         }
-                        className="p-1 text-red-400 hover:bg-red-50 rounded"
+                        className="p-1.5 text-red-400 hover:bg-red-50 rounded"
                         title="Удалить навсегда"
                       >
-                        <Trash2 size={13} />
+                        <Trash2 size={14} />
                       </button>
                     </div>
                   </div>
@@ -259,7 +263,7 @@ export default function AdminPage() {
         </section>
 
         {/* Fonts */}
-        <section className="bg-white rounded-xl border p-6">
+        <section className="bg-white rounded-xl border p-4 sm:p-6">
           <h2 className="font-semibold text-gray-700 mb-1 flex items-center gap-2"><Type size={16} /> Шрифты</h2>
           <p className="text-sm text-gray-500 mb-4">
             Загрузите .ttf / .otf / .woff / .woff2 — <b>имя шрифта определится из файла автоматически</b>
@@ -326,7 +330,7 @@ export default function AdminPage() {
         </section>
 
         {/* Backups */}
-        <section className="bg-white rounded-xl border p-6">
+        <section className="bg-white rounded-xl border p-4 sm:p-6">
           <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
             <h2 className="font-semibold text-gray-700 flex items-center gap-2 shrink-0"><Archive size={16} /> Резервные копии</h2>
             <button
@@ -379,7 +383,7 @@ export default function AdminPage() {
         </section>
 
         {/* Transfer admin */}
-        <section className="bg-white rounded-xl border p-6">
+        <section className="bg-white rounded-xl border p-4 sm:p-6">
           <h2 className="font-semibold text-gray-700 mb-4 flex items-center gap-2"><ShieldCheck size={16} /> Передать права администратора</h2>
           <p className="text-sm text-gray-500 mb-3">При передаче прав вы станете читателем и будете разлогинены.</p>
           <div className="flex gap-3">
