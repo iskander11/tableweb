@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { io, Socket } from 'socket.io-client';
 import { Workbook } from '@fortune-sheet/react';
 import '@fortune-sheet/react/dist/index.css';
-import { ArrowLeft, Download, Upload, Users, Save } from 'lucide-react';
+import { ArrowLeft, Download, Upload, Users, Save, History, X, Info } from 'lucide-react';
 import api from '../api/client';
 import { useAuth } from '../store/auth';
 import { useFonts } from '../fonts/useFonts';
@@ -15,6 +15,13 @@ interface ImportState {
   active: boolean;
   progress: number;
   error: string | null;
+}
+
+interface ChangeEntry {
+  username: string;
+  sheet_index: number;
+  summary: string | null;
+  saved_at: string;
 }
 
 function buildSheets(sheetMeta: any) {
@@ -60,6 +67,11 @@ function excelRefToFilterSelect(ref?: string) {
   };
 }
 
+function formatTime(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
 export default function SheetPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -70,11 +82,15 @@ export default function SheetPage() {
   const [sheets, setSheets] = useState<any[]>([]);
   const [importState, setImportState] = useState<ImportState>({ active: false, progress: 0, error: null });
   const [workbookKey, setWorkbookKey] = useState(0);
-  const [saveState, setSaveState] = useState<'idle' | 'saved'>('idle');
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [isDirty, setIsDirty] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { version: fontsVersion } = useFonts();
+
+  const editor = isEditor();
 
   useEffect(() => {
     if (fontsVersion > 0) setWorkbookKey((k) => k + 1);
@@ -92,6 +108,12 @@ export default function SheetPage() {
     setSheets(built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }]);
   }, [sheetMeta]);
 
+  // Load changelog when panel opens
+  useEffect(() => {
+    if (!showHistory || !id) return;
+    api.get(`/spreadsheets/${id}/changelog`).then((r) => setChangelog(r.data));
+  }, [showHistory, id]);
+
   useEffect(() => {
     if (!token) return;
     const socket = io('/', { auth: { token } });
@@ -101,46 +123,50 @@ export default function SheetPage() {
     socket.on('cell-change', ({ changes }) => {
       workbookRef.current?.applyOp?.(changes);
     });
+    socket.on('changelog-update', (entry: ChangeEntry) => {
+      setChangelog((prev) => [entry, ...prev].slice(0, 100));
+    });
     return () => { socket.disconnect(); };
   }, [id, token]);
 
-  const saveSheet = useCallback((data: any, index: number) => {
-    if (!data) return;
-    socketRef.current?.emit('save-sheet', {
-      sheetId: id,
-      sheetIndex: index,
-      data: {
-        name: data.name,
-        cells: cellsFromSheet(data),
-        columnWidths: data.config?.columnlen || {},
-        rowHeights: data.config?.rowlen || {},
-        merges: data.config?.merge || {},
-        borderInfo: data.config?.borderInfo || [],
-        filterSelect: data.filter_select || null,
-        filterCriteria: data.filter || null,
-        frozen: data.frozen || null,
-      },
+  const saveAll = useCallback((allSheets: any[], summary?: string) => {
+    (allSheets || []).forEach((s, i) => {
+      const data = {
+        name: s.name,
+        cells: cellsFromSheet(s),
+        columnWidths: s.config?.columnlen || {},
+        rowHeights: s.config?.rowlen || {},
+        merges: s.config?.merge || {},
+        borderInfo: s.config?.borderInfo || [],
+        filterSelect: s.filter_select || null,
+        filterCriteria: s.filter || null,
+        frozen: s.frozen || null,
+      };
+      socketRef.current?.emit('save-sheet', {
+        sheetId: id,
+        sheetIndex: s.index ?? i,
+        data,
+        summary: summary || null,
+      });
     });
   }, [id]);
 
-  const saveAll = useCallback((allSheets: any[]) => {
-    (allSheets || []).forEach((s, i) => saveSheet(s, s.index ?? i));
-  }, [saveSheet]);
-
   const handleSaveNow = useCallback(() => {
     const all = latestSheetsRef.current || sheets;
+    setSaveState('saving');
     saveAll(all);
+    setIsDirty(false);
     setSaveState('saved');
-    setTimeout(() => setSaveState('idle'), 1800);
+    setTimeout(() => setSaveState('idle'), 2000);
   }, [saveAll, sheets]);
 
   const handleChange = useCallback((allSheets: any) => {
-    if (!isEditor() || !allSheets?.length) return;
+    if (!editor || !allSheets?.length) return;
     latestSheetsRef.current = allSheets;
+    setIsDirty(true);
+    // Broadcast to other users for real-time collaboration (no auto-save)
     socketRef.current?.emit('cell-change', { sheetId: id, changes: allSheets });
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => saveAll(allSheets), 2000);
-  }, [id, isEditor, saveAll]);
+  }, [id, editor]);
 
   const handleExport = async () => {
     const res = await api.get(`/excel/${id}/export`, { responseType: 'blob' });
@@ -178,6 +204,7 @@ export default function SheetPage() {
               setSheets(fresh.length ? fresh : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }]);
               setWorkbookKey((k) => k + 1);
               setImportState({ active: false, progress: 0, error: null });
+              setIsDirty(false);
             });
           }
         }
@@ -210,6 +237,7 @@ export default function SheetPage() {
 
   return (
     <div className="flex flex-col h-screen bg-white">
+      {/* Import progress overlay */}
       {importState.active && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">
           <div className="bg-white rounded-2xl shadow-xl p-8 w-80">
@@ -238,71 +266,166 @@ export default function SheetPage() {
         </div>
       )}
 
-      <header className="bg-white border-b px-4 py-2 flex items-center gap-3 shrink-0">
+      {/* Header */}
+      <header className="bg-white border-b px-3 py-2 flex items-center gap-2 shrink-0 flex-wrap sm:flex-nowrap">
         <button onClick={() => navigate('/')} className="p-1 rounded hover:bg-gray-100 shrink-0">
           <ArrowLeft size={18} />
         </button>
-        <h2 className="font-semibold text-gray-800 flex-1 min-w-0 truncate">{sheetMeta?.name}</h2>
+        <h2 className="font-semibold text-gray-800 flex-1 min-w-0 truncate text-sm sm:text-base">
+          {sheetMeta?.name}
+        </h2>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
           {onlineUsers.length > 0 && (
-            <div className="flex items-center gap-1 text-xs text-gray-500 max-w-[180px] overflow-hidden">
+            <div className="hidden sm:flex items-center gap-1 text-xs text-gray-500 max-w-[160px] overflow-hidden">
               <Users size={13} className="shrink-0" />
-              {onlineUsers.map((u) => (
+              {onlineUsers.slice(0, 3).map((u) => (
                 <span key={u.id} className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded truncate">{u.username}</span>
               ))}
+              {onlineUsers.length > 3 && <span className="text-gray-400 text-xs">+{onlineUsers.length - 3}</span>}
             </div>
           )}
 
-          {isEditor() && (
+          {editor ? (
             <>
-              <button onClick={handleSaveNow} title="Сохранить все изменения"
-                className={`flex items-center gap-1.5 text-sm rounded-lg px-3 py-1.5 border transition ${
+              <button
+                onClick={handleSaveNow}
+                title="Сохранить все изменения (обязательно нажмите после редактирования)"
+                className={`flex items-center gap-1 text-xs sm:text-sm rounded-lg px-2 sm:px-3 py-1.5 border transition font-medium ${
                   saveState === 'saved'
-                    ? 'border-green-200 bg-green-50 text-green-600'
+                    ? 'border-green-300 bg-green-50 text-green-600'
+                    : isDirty
+                    ? 'border-orange-300 bg-orange-50 text-orange-600 animate-pulse'
                     : 'border-gray-200 text-gray-600 hover:text-gray-800 hover:bg-gray-50'
-                }`}>
-                <Save size={14} /> {saveState === 'saved' ? 'Сохранено' : 'Сохранить'}
+                }`}
+              >
+                <Save size={14} />
+                <span className="hidden xs:inline">
+                  {saveState === 'saved' ? 'Сохранено' : 'Сохранить'}
+                </span>
               </button>
-              <label title="Импорт .xlsx" className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
-                <Upload size={14} /> Импорт
+              <label
+                title="Импорт .xlsx"
+                className="flex items-center gap-1 cursor-pointer text-xs sm:text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-2 sm:px-3 py-1.5 hover:bg-gray-50 transition"
+              >
+                <Upload size={14} />
+                <span className="hidden sm:inline">Импорт</span>
                 <input type="file" accept=".xlsx,.xls" className="hidden" onChange={handleImport} />
               </label>
-              <button onClick={handleExport} title="Экспорт .xlsx"
-                className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
-                <Download size={14} /> Экспорт
+              <button
+                onClick={handleExport}
+                title="Экспорт .xlsx"
+                className="flex items-center gap-1 text-xs sm:text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-2 sm:px-3 py-1.5 hover:bg-gray-50 transition"
+              >
+                <Download size={14} />
+                <span className="hidden sm:inline">Экспорт</span>
               </button>
             </>
+          ) : (
+            <button
+              onClick={handleExport}
+              title="Экспорт .xlsx"
+              className="flex items-center gap-1 text-xs sm:text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-2 sm:px-3 py-1.5 hover:bg-gray-50 transition"
+            >
+              <Download size={14} />
+              <span className="hidden sm:inline">Экспорт</span>
+            </button>
           )}
+
+          <button
+            onClick={() => setShowHistory((v) => !v)}
+            title="История изменений"
+            className={`flex items-center gap-1 text-xs sm:text-sm rounded-lg px-2 sm:px-3 py-1.5 border transition ${
+              showHistory ? 'border-blue-300 bg-blue-50 text-blue-600' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <History size={14} />
+            <span className="hidden sm:inline">История</span>
+          </button>
         </div>
       </header>
 
-      <div className="flex-1 overflow-hidden">
-        <Workbook
-          key={workbookKey}
-          ref={workbookRef}
-          data={sheets}
-          lang="ru"
-          onChange={handleChange}
-          showToolbar={isEditor()}
-          showFormulaBar
-          allowEdit={isEditor()}
-          toolbarItems={[
-            'undo','redo','|',
-            'format-painter','clear-format','|',
-            'font','|',
-            'font-size','|',
-            'bold','italic','strike-through','underline','|',
-            'font-color','background','|',
-            'border','merge-cell','|',
-            'horizontal-align','vertical-align','text-wrap','text-rotation','|',
-            'currency-format','percentage-format','number-decrease','number-increase','format','|',
-            'freeze','filter','conditionFormat','|',
-            'quick-formula','|',
-            'comment','link','image','|',
-            'search','screenshot',
-          ]}
-        />
+      {/* Reader banner */}
+      {!editor && (
+        <div className="bg-blue-50 border-b border-blue-100 px-4 py-2 flex items-center gap-2 text-sm text-blue-700 shrink-0">
+          <Info size={15} className="shrink-0" />
+          <span>Вы в режиме чтения — редактирование недоступно.</span>
+        </div>
+      )}
+
+      {/* Dirty hint for editors */}
+      {editor && isDirty && saveState === 'idle' && (
+        <div className="bg-orange-50 border-b border-orange-100 px-4 py-1.5 flex items-center gap-2 text-xs text-orange-700 shrink-0">
+          <Info size={14} className="shrink-0" />
+          <span>Есть несохранённые изменения — нажмите кнопку <strong>«Сохранить»</strong> чтобы не потерять их.</span>
+        </div>
+      )}
+
+      {/* Main content area */}
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex-1 overflow-hidden">
+          <Workbook
+            key={workbookKey}
+            ref={workbookRef}
+            data={sheets}
+            lang="ru"
+            onChange={handleChange}
+            showToolbar={editor}
+            showFormulaBar
+            allowEdit={editor}
+            toolbarItems={[
+              'undo','redo','|',
+              'format-painter','clear-format','|',
+              'font','|',
+              'font-size','|',
+              'bold','italic','strike-through','underline','|',
+              'font-color','background','|',
+              'border','merge-cell','|',
+              'horizontal-align','vertical-align','text-wrap','text-rotation','|',
+              'currency-format','percentage-format','number-decrease','number-increase','format','|',
+              'freeze','filter','conditionFormat','|',
+              'quick-formula','|',
+              'comment','link','image','|',
+              'search','screenshot',
+            ]}
+          />
+        </div>
+
+        {/* History sidebar */}
+        {showHistory && (
+          <div className="w-64 sm:w-72 border-l bg-white flex flex-col shrink-0 overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
+              <span className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
+                <History size={14} /> История изменений
+              </span>
+              <button onClick={() => setShowHistory(false)} className="p-1 rounded hover:bg-gray-100 text-gray-400">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {changelog.length === 0 ? (
+                <p className="text-xs text-gray-400 text-center py-8 px-3">Изменений пока нет</p>
+              ) : (
+                <ul className="divide-y">
+                  {changelog.map((e, i) => (
+                    <li key={i} className="px-3 py-2.5">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold shrink-0">
+                          {e.username[0].toUpperCase()}
+                        </span>
+                        <span className="text-sm font-medium text-gray-800 truncate">{e.username}</span>
+                      </div>
+                      {e.summary && (
+                        <p className="text-xs text-gray-600 mt-0.5 ml-6.5 break-words">{e.summary}</p>
+                      )}
+                      <p className="text-xs text-gray-400 mt-0.5 ml-6.5">{formatTime(e.saved_at)}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

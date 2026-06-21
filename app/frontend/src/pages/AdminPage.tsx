@@ -44,6 +44,12 @@ export default function AdminPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
   });
 
+  const reactivateUser = useMutation({
+    mutationFn: ({ id, role }: { id: string; role: string }) =>
+      api.patch(`/auth/users/${id}/reactivate`, { role }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+  });
+
   const changeRole = useMutation({
     mutationFn: ({ id, role }: { id: string; role: string }) => api.patch(`/auth/users/${id}/role`, { role }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
@@ -197,8 +203,9 @@ export default function AdminPage() {
                   </select>
                   {u.id !== user?.id && (
                     <button
-                      onClick={() => confirm(`Удалить ${u.username}?`) && deleteUser.mutate(u.id)}
+                      onClick={() => confirm(`Деактивировать ${u.username}?`) && deleteUser.mutate(u.id)}
                       className="p-1 text-red-400 hover:bg-red-50 rounded"
+                      title="Деактивировать"
                     >
                       <Trash2 size={14} />
                     </button>
@@ -207,6 +214,30 @@ export default function AdminPage() {
               </div>
             ))}
           </div>
+
+          {/* Deactivated users */}
+          {users.filter((u) => !u.is_active).length > 0 && (
+            <div className="mt-4 pt-4 border-t">
+              <p className="text-xs text-gray-400 font-medium mb-2 uppercase tracking-wide">Деактивированные</p>
+              <div className="space-y-1">
+                {users.filter((u) => !u.is_active).map((u) => (
+                  <div key={u.id} className="flex items-center justify-between py-1.5">
+                    <div>
+                      <span className="text-gray-400 line-through text-sm">{u.username}</span>
+                      <span className="text-xs text-gray-300 ml-2">{u.role}</span>
+                    </div>
+                    <button
+                      onClick={() => reactivateUser.mutate({ id: u.id, role: u.role })}
+                      className="text-xs text-blue-600 hover:bg-blue-50 border border-blue-200 rounded px-2 py-0.5"
+                      title="Восстановить пользователя"
+                    >
+                      Восстановить
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Fonts */}

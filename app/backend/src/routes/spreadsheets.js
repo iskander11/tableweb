@@ -159,6 +159,21 @@ router.patch('/:id/lock', authenticate, requireAdmin, async (req, res) => {
   res.json({ success: true });
 });
 
+// Get change log for a spreadsheet
+router.get('/:id/changelog', authenticate, async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT username, sheet_index, summary, saved_at
+       FROM change_log WHERE spreadsheet_id = $1
+       ORDER BY saved_at DESC LIMIT 100`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Toggle backup
 router.patch('/:id/backup-toggle', authenticate, async (req, res) => {
   const { rows: [sheet] } = await query('SELECT * FROM spreadsheets WHERE id = $1', [req.params.id]);

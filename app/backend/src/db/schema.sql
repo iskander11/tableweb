@@ -69,6 +69,18 @@ CREATE INDEX IF NOT EXISTS idx_users_username_lower ON users(LOWER(username));
 CREATE INDEX IF NOT EXISTS idx_spreadsheets_created_by ON spreadsheets(created_by);
 CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at DESC);
 
+-- Change log (who saved what and when)
+CREATE TABLE IF NOT EXISTS change_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  spreadsheet_id UUID NOT NULL REFERENCES spreadsheets(id) ON DELETE CASCADE,
+  sheet_index INT NOT NULL DEFAULT 0,
+  user_id UUID NOT NULL REFERENCES users(id),
+  username VARCHAR(50) NOT NULL,
+  saved_at TIMESTAMPTZ DEFAULT NOW(),
+  summary TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_change_log_sheet ON change_log(spreadsheet_id, saved_at DESC);
+
 -- Admin transfer log
 CREATE TABLE IF NOT EXISTS admin_transfers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

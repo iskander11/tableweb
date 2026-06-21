@@ -42,14 +42,25 @@ router.post('/users', authenticate, requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Пароль должен быть не менее 4 символов' });
   }
   try {
+    const trimmed = username.trim();
     const existing = await query(
-      'SELECT 1 FROM users WHERE LOWER(username) = LOWER($1)',
-      [username.trim()]
+      'SELECT id, is_active FROM users WHERE LOWER(username) = LOWER($1)',
+      [trimmed]
     );
     if (existing.rows.length) {
-      return res.status(409).json({ error: `Пользователь «${username.trim()}» уже существует` });
+      const found = existing.rows[0];
+      if (found.is_active) {
+        return res.status(409).json({ error: `Пользователь «${trimmed}» уже существует` });
+      }
+      // Reactivate previously deleted user
+      const hash = await bcrypt.hash(password, 12);
+      const { rows } = await query(
+        `UPDATE users SET is_active = TRUE, password_hash = $1, role = $2, created_by = $3
+         WHERE id = $4 RETURNING id, username, role`,
+        [hash, role || 'reader', req.user.id, found.id]
+      );
+      return res.status(201).json(rows[0]);
     }
-    const trimmed = username.trim();
     const hash = await bcrypt.hash(password, 12);
     const { rows } = await query(
       'INSERT INTO users (username, email, password_hash, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, username, role',
@@ -82,6 +93,16 @@ router.patch('/users/:id/role', authenticate, requireAdmin, async (req, res) => 
 // Deactivate user (admin only)
 router.delete('/users/:id', authenticate, requireAdmin, async (req, res) => {
   await query('UPDATE users SET is_active = FALSE WHERE id = $1', [req.params.id]);
+  res.json({ success: true });
+});
+
+// Reactivate user (admin only)
+router.patch('/users/:id/reactivate', authenticate, requireAdmin, async (req, res) => {
+  const { role } = req.body;
+  await query(
+    'UPDATE users SET is_active = TRUE, role = COALESCE($1, role) WHERE id = $2',
+    [role || null, req.params.id]
+  );
   res.json({ success: true });
 });
 
