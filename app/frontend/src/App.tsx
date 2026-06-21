@@ -28,14 +28,13 @@ function AppContent() {
   const [siteUnlocked, setSiteUnlocked] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // Try a lightweight request to check if site cookie is valid
-    api.get('/auth/me').then(() => {
+    // Use a dedicated endpoint that only checks the site cookie (no JWT needed)
+    api.get('/site-ping').then(() => {
       setSiteUnlocked(true);
     }).catch((err) => {
       if (err.response?.data?.requireSiteAuth) {
         setSiteUnlocked(false);
       } else {
-        // 401 from JWT (not logged in) — site is unlocked, just need user login
         setSiteUnlocked(true);
       }
     });

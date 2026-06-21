@@ -38,6 +38,9 @@ app.use(express.json({ limit: '50mb' }));
 app.post('/api/site-auth', siteAuthLogin);
 app.use(requireSiteAuth);
 
+// Lightweight ping — returns 200 if site cookie is valid (no JWT needed)
+app.get('/api/site-ping', (_req, res) => res.json({ ok: true }));
+
 app.use('/api/auth', authRoutes);
 app.use('/api/spreadsheets', spreadsheetRoutes);
 app.use('/api/excel', excelRoutes);
