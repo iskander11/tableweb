@@ -89,14 +89,18 @@ export default function SheetPage() {
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
   const lastSavedSheetsRef = useRef<any[] | null>(null);
-  // FortuneSheet fires onChange once during init — ignore it
-  const initChangeCountRef = useRef(0);
+  // FortuneSheet fires onChange multiple times during init — ignore until ready
+  const acceptChangesRef = useRef(false);
   const { version: fontsVersion } = useFonts();
 
   const editor = isEditor();
 
   useEffect(() => {
-    if (fontsVersion > 0) setWorkbookKey((k) => k + 1);
+    if (fontsVersion > 0) {
+      acceptChangesRef.current = false;
+      setWorkbookKey((k) => k + 1);
+      setTimeout(() => { acceptChangesRef.current = true; }, 800);
+    }
   }, [fontsVersion]);
 
   const { data: sheetMeta, isError: sheetError } = useQuery({
@@ -111,8 +115,10 @@ export default function SheetPage() {
     const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
     setSheets(data);
     lastSavedSheetsRef.current = data;
-    initChangeCountRef.current = 0;
+    acceptChangesRef.current = false;
     setIsDirty(false);
+    // Allow ~800ms for FortuneSheet to finish its own init onChange calls
+    setTimeout(() => { acceptChangesRef.current = true; }, 800);
   }, [sheetMeta]);
 
   // Load changelog when panel opens
@@ -199,11 +205,7 @@ export default function SheetPage() {
 
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;
-    // FortuneSheet fires onChange once on mount — skip the very first call
-    if (initChangeCountRef.current < 1) {
-      initChangeCountRef.current += 1;
-      return;
-    }
+    if (!acceptChangesRef.current) return;
     latestSheetsRef.current = allSheets;
     setIsDirty(true);
     // Broadcast to other users for real-time collaboration (no auto-save)
