@@ -89,8 +89,9 @@ export default function SheetPage() {
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
   const lastSavedSheetsRef = useRef<any[] | null>(null);
-  // FortuneSheet fires onChange multiple times during init — ignore until ready
+  // FortuneSheet fires onChange during init — ignore until ready, then treat first call as baseline
   const acceptChangesRef = useRef(false);
+  const baselineTakenRef = useRef(false);
   const { version: fontsVersion } = useFonts();
 
   const editor = isEditor();
@@ -98,6 +99,7 @@ export default function SheetPage() {
   useEffect(() => {
     if (fontsVersion > 0) {
       acceptChangesRef.current = false;
+      baselineTakenRef.current = false;
       setWorkbookKey((k) => k + 1);
       setTimeout(() => { acceptChangesRef.current = true; }, 800);
     }
@@ -107,6 +109,8 @@ export default function SheetPage() {
     queryKey: ['sheet', id],
     queryFn: () => api.get(`/spreadsheets/${id}`).then((r) => r.data),
     retry: false,
+    staleTime: 0,   // always refetch when navigating back to the page
+    gcTime: 0,
   });
 
   useEffect(() => {
@@ -116,6 +120,7 @@ export default function SheetPage() {
     setSheets(data);
     lastSavedSheetsRef.current = data;
     acceptChangesRef.current = false;
+    baselineTakenRef.current = false;
     setIsDirty(false);
     // Allow ~800ms for FortuneSheet to finish its own init onChange calls
     setTimeout(() => { acceptChangesRef.current = true; }, 800);
@@ -206,6 +211,13 @@ export default function SheetPage() {
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;
     if (!acceptChangesRef.current) return;
+    // First onChange after init timeout: treat as baseline (FortuneSheet may still be normalizing)
+    if (!baselineTakenRef.current) {
+      baselineTakenRef.current = true;
+      latestSheetsRef.current = allSheets;
+      lastSavedSheetsRef.current = allSheets;
+      return;
+    }
     latestSheetsRef.current = allSheets;
     setIsDirty(true);
     // Broadcast to other users for real-time collaboration (no auto-save)
