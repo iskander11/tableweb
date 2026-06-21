@@ -3,10 +3,12 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import compression from 'compression';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import cron from 'node-cron';
 import jwt from 'jsonwebtoken';
 
+import { siteAuthLogin, requireSiteAuth } from './middleware/siteAuth.js';
 import authRoutes from './routes/auth.js';
 import spreadsheetRoutes from './routes/spreadsheets.js';
 import excelRoutes from './routes/excel.js';
@@ -29,7 +31,12 @@ const io = new Server(httpServer, {
 
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
 app.use(compression());
+app.use(cookieParser());
 app.use(express.json({ limit: '50mb' }));
+
+// Site-level password gate (before all other routes)
+app.post('/api/site-auth', siteAuthLogin);
+app.use(requireSiteAuth);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/spreadsheets', spreadsheetRoutes);
