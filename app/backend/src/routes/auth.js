@@ -89,10 +89,11 @@ router.get('/users', authenticate, requireAdmin, async (req, res) => {
   res.json(rows);
 });
 
-// Get username→color map for all active users (accessible to all authenticated users)
+// Get username→color map for ALL users (incl. deactivated — historical edits still
+// need their author's color). Accessible to all authenticated users.
 router.get('/user-colors', authenticate, async (req, res) => {
   const { rows } = await query(
-    'SELECT username, color FROM users WHERE is_active = TRUE'
+    'SELECT username, color FROM users'
   );
   res.json(rows);
 });

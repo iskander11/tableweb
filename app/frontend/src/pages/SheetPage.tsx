@@ -80,6 +80,22 @@ function excelRefToFilterSelect(ref?: string) {
   };
 }
 
+// Stable, readable color derived from a username — used when a user has no color
+// in the DB (or hasn't loaded yet). Deterministic so the same user always looks the
+// same, instead of everyone falling back to one shared blue.
+function colorFromUsername(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return `hsl(${hue}, 65%, 45%)`;
+}
+
+// Resolve the display color for an edit author: DB color if present, else a stable
+// per-username fallback (never the old shared #3B82F6).
+function userColor(colors: Record<string, string>, name: string): string {
+  return colors[name] || colorFromUsername(name);
+}
+
 function formatTime(iso: string) {
   const d = new Date(iso);
   return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -344,29 +360,33 @@ export default function SheetPage() {
     const sbx = wrap?.querySelector('.luckysheet-scrollbar-x') as HTMLElement | null;
     const sby = wrap?.querySelector('.luckysheet-scrollbar-y') as HTMLElement | null;
 
-    // Step 2: once the top-left scroll has rendered, shift by half the viewport to CENTER it.
-    const center = () => {
+    // Step 2: center the cell by MEASURING its actual rendered rect and nudging the
+    // scrollbars by the delta to the canvas center. Because we measure the real on-screen
+    // position, any frozen-row/column offset is already baked in — no special-casing the
+    // frozen pane (the old "shift by half the viewport" math broke exactly here, throwing
+    // the view sideways on tables with frozen areas). Returns true once it had a rect to act on.
+    const centerOnce = (): boolean => {
+      const canvas = getCanvas();
       const rect = cellRectMapRef.current.get(`${r}_${c}`);
-      if (sbx && rect) {
-        const shift = Math.max(0, (sbx.clientWidth - rect.w) / 2);
-        sbx.scrollLeft = Math.max(0, sbx.scrollLeft - shift);
-      }
-      if (sby && rect) {
-        const shift = Math.max(0, (sby.clientHeight - rect.h) / 2);
-        sby.scrollTop = Math.max(0, sby.scrollTop - shift);
-      }
+      if (!canvas || !rect) return false;
+      const dx = (rect.x + rect.w / 2) - canvas.clientWidth / 2;
+      const dy = (rect.y + rect.h / 2) - canvas.clientHeight / 2;
+      if (sbx) sbx.scrollLeft = Math.max(0, sbx.scrollLeft + dx);
+      if (sby) sby.scrollTop = Math.max(0, sby.scrollTop + dy);
+      return true;
     };
-    setTimeout(center, 90);
 
-    // Step 3: after the centered scroll renders, read the cell's exact rect and pulse it.
+    // Step 3: run a few centering passes (variable row heights make it converge over a
+    // couple of redraws), then read the settled rect and pulse-highlight the cell.
     let tries = 0;
     const tick = () => {
       tries += 1;
+      const centered = centerOnce();
       const rect = cellRectMapRef.current.get(`${r}_${c}`);
       const origin = getCanvasOrigin();
-      if (rect && origin && tries >= 2) {
+      if (centered && rect && origin && tries >= 3) {
         const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
-        const color = change ? (userColors[change.username] ?? '#3B82F6') : '#3B82F6';
+        const color = change ? userColor(userColors, change.username) : '#3B82F6';
         setNavHighlight({
           left: origin.left + rect.x, top: origin.top + rect.y,
           width: rect.w, height: rect.h, color,
@@ -376,8 +396,8 @@ export default function SheetPage() {
         setTimeout(tick, 70);
       }
     };
-    setTimeout(tick, 200);
-  }, [cellHighlights, userColors, getCanvasOrigin]);
+    setTimeout(tick, 150);
+  }, [cellHighlights, userColors, getCanvas, getCanvasOrigin]);
 
   // Note: change detection (diff + summary) is computed server-side on save.
 
@@ -764,7 +784,7 @@ export default function SheetPage() {
               if (!onScreen && now - info.t > FADE_KEEP) { seen.delete(hKey); continue; }
               const change = cellHighlights[hKey];
               if (!change) { seen.delete(hKey); continue; }
-              const color = userColors[change.username] ?? '#3B82F6';
+              const color = userColor(userColors, change.username);
               items.push(
                 <div key={hKey} style={{
                   position: 'absolute', left: info.left, top: info.top, width: info.w, height: info.h,
@@ -841,7 +861,7 @@ export default function SheetPage() {
                 ) : (
                   <ul className="divide-y">
                     {changelog.map((e, i) => {
-                      const uColor = userColors[e.username] ?? '#3B82F6';
+                      const uColor = userColor(userColors, e.username);
                       return (
                         <li key={i} className="px-3 py-3">
                           <div className="flex items-center gap-1.5 mb-0.5">
