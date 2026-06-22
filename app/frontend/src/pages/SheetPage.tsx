@@ -120,6 +120,11 @@ export default function SheetPage() {
   // Current virtual scroll offset in CSS px (content scrolled left/up by this amount)
   // Updated on every afterRenderCell so it's always fresh
   const scrollOffsetRef = useRef({ sx: 0, sy: 0 });
+  // Exact CSS rects of rendered cells from afterRenderCell (coords relative to canvas origin)
+  // FortuneSheet computes these precisely including merges and borders
+  const cellRectMapRef = useRef<Map<string, { x: number; y: number; w: number; h: number }>>(new Map());
+  const pendingRectMapRef = useRef<Map<string, { x: number; y: number; w: number; h: number }>>(new Map());
+  const renderBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Mirror of activeSheetIdx for use inside stable useMemo hooks
   const activeSheetIdxRef = useRef(0);
   // Keep ref in sync so stable hooks can read current sheet index
@@ -150,6 +155,8 @@ export default function SheetPage() {
     canvasOriginRef.current = { top: -1, left: 0 };
     scrollOffsetRef.current = { sx: 0, sy: 0 };
     headerSizeRef.current = { rowHeaderW: 46, colHeaderH: 20 };
+    cellRectMapRef.current = new Map();
+    pendingRectMapRef.current = new Map();
   }, [workbookKey]);
 
   // Reset grid origin measurement when browser zoom changes (devicePixelRatio changes)
@@ -378,27 +385,35 @@ export default function SheetPage() {
     // Redirect to merge master if this cell is a slave
     const merges: Record<string, { r: number; c: number; rs: number; cs: number }> =
       sheetData?.config?.merge ?? {};
-    let mergeSpan: { rs: number; cs: number } | undefined;
     for (const m of Object.values(merges)) {
       if (row >= m.r && row < m.r + m.rs && col >= m.c && col < m.c + m.cs) {
         row = m.r; col = m.c;
-        mergeSpan = { rs: m.rs, cs: m.cs };
         break;
       }
-    }
-    if (!mergeSpan && merges[`${row}_${col}`]) {
-      const m = merges[`${row}_${col}`];
-      mergeSpan = { rs: m.rs, cs: m.cs };
     }
 
     const hKey = `${activeSheetIdx}_${row}_${col}`;
     const change = cellHighlights[hKey];
-    if (!change) { setHoverOverlay(null); return; }
+    const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
+    const username = change?.username ?? null;
 
-    const color = userColors[change.username] ?? '#3B82F6';
-    const rect = getCellCSSRect(activeSheetIdx, row, col, mergeSpan);
-
-    setHoverOverlay({ ...rect, color, username: change.username });
+    // Use exact position from afterRenderCell map (FortuneSheet computes this correctly).
+    // Fall back to mathematical estimate only for empty cells not in the map.
+    const cL = canvasOriginRef.current.left;
+    const cT = canvasOriginRef.current.top;
+    const mapEntry = cellRectMapRef.current.get(`${row}_${col}`);
+    if (mapEntry) {
+      setHoverOverlay({
+        left: cL + mapEntry.x, top: cT + mapEntry.y,
+        width: mapEntry.w,     height: mapEntry.h,
+        color, username,
+      });
+    } else {
+      // Cell not in map (empty) — use mathematical fallback
+      const mergeSpan = merges[`${row}_${col}`] ? { rs: merges[`${row}_${col}`].rs, cs: merges[`${row}_${col}`].cs } : undefined;
+      const rect = getCellCSSRect(activeSheetIdx, row, col, mergeSpan);
+      setHoverOverlay({ ...rect, color, username });
+    }
   }, [activeSheetIdx, cellHighlights, userColors, measureGridOrigin, sheets, getCellCSSRect]);
 
   const handleWorkbookMouseLeave = useCallback(() => {
@@ -506,7 +521,8 @@ export default function SheetPage() {
     const changedCells = computeChangedCells(all, lastSavedSheetsRef.current);
     setSaveState('saving');
     saveAll(all, summary, changedCells);
-    lastSavedSheetsRef.current = all;
+    // Deep clone so mutations by FortuneSheet don't affect the saved baseline
+    lastSavedSheetsRef.current = JSON.parse(JSON.stringify(all));
     setIsDirty(false);
     setSaveState('saved');
     setTimeout(() => setSaveState('idle'), 2000);
@@ -519,7 +535,7 @@ export default function SheetPage() {
     if (!baselineTakenRef.current) {
       baselineTakenRef.current = true;
       latestSheetsRef.current = allSheets;
-      lastSavedSheetsRef.current = allSheets;
+      lastSavedSheetsRef.current = JSON.parse(JSON.stringify(allSheets));
       return;
     }
     latestSheetsRef.current = allSheets;
@@ -590,17 +606,30 @@ export default function SheetPage() {
       const ratio = canvasPxRatioRef.current > 0 ? canvasPxRatioRef.current : 1;
       const r = cellInfo.row as number;
       const c = cellInfo.column as number;
-      const actualX = cellInfo.startX / ratio;
-      const actualY = cellInfo.startY / ratio;
+      const cssX = cellInfo.startX / ratio;
+      const cssY = cellInfo.startY / ratio;
+      const cssW = (cellInfo.endX - cellInfo.startX) / ratio;
+      const cssH = (cellInfo.endY - cellInfo.startY) / ratio;
+
+      // Store exact CSS position (relative to canvas origin) in the map.
+      // FortuneSheet computes these correctly including merge spans and borders.
+      pendingRectMapRef.current.set(`${r}_${c}`, { x: cssX, y: cssY, w: cssW, h: cssH });
+      if (renderBatchTimerRef.current !== null) clearTimeout(renderBatchTimerRef.current);
+      renderBatchTimerRef.current = setTimeout(() => {
+        cellRectMapRef.current = pendingRectMapRef.current;
+        pendingRectMapRef.current = new Map();
+        renderBatchTimerRef.current = null;
+      }, 50);
 
       // Calibrate row/col header pixel sizes from the top-left data cell
       if (r === 0 && c === 0) {
-        headerSizeRef.current = { rowHeaderW: actualX, colHeaderH: actualY };
+        headerSizeRef.current = { rowHeaderW: cssX, colHeaderH: cssY };
       }
 
-      // Derive current virtual scroll offset:
-      //   canvas_x = rowHeaderW + sum(colWidths[0..c-1]) - scrollX
-      //   → scrollX = rowHeaderW + sum(colWidths[0..c-1]) - canvas_x
+      // Derive virtual scroll offset from this cell's actual vs expected position.
+      //   expected_x = rowHeaderW + sum(colWidths[0..c-1])
+      //   actual_x   = expected_x - scrollX
+      //   → scrollX  = expected_x - actual_x
       const sheetData = latestSheetsRef.current?.[activeSheetIdxRef.current];
       const colLens: Record<number, number> = sheetData?.config?.columnlen ?? {};
       const rowLens: Record<number, number> = sheetData?.config?.rowlen ?? {};
@@ -609,7 +638,7 @@ export default function SheetPage() {
       let expX = rowHeaderW, expY = colHeaderH;
       for (let i = 0; i < c; i++) expX += (colLens[i] ?? DW);
       for (let i = 0; i < r; i++) expY += (rowLens[i] ?? DH);
-      scrollOffsetRef.current = { sx: expX - actualX, sy: expY - actualY };
+      scrollOffsetRef.current = { sx: expX - cssX, sy: expY - cssY };
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -806,24 +835,32 @@ export default function SheetPage() {
 
           {/* Navigation highlight — shown 2.5s after clicking a history entry */}
           {navHighlight && (() => {
-            // Use mathematical position (getCellCSSRect) — works for any cell including empty ones.
-            // getCellCSSRect uses scrollOffsetRef which is updated by afterRenderCell after the scroll.
-            const merges: Record<string, { r: number; c: number; rs: number; cs: number }> =
-              ((latestSheetsRef.current ?? sheets)[navHighlight.sheetIdx]?.config?.merge) ?? {};
-            const m = merges[`${navHighlight.r}_${navHighlight.c}`];
-            const span = m ? { rs: m.rs, cs: m.cs } : undefined;
-            const rect = getCellCSSRect(navHighlight.sheetIdx, navHighlight.r, navHighlight.c, span);
+            const cL = canvasOriginRef.current.left;
+            const cT = canvasOriginRef.current.top;
             const hKey = `${navHighlight.sheetIdx}_${navHighlight.r}_${navHighlight.c}`;
             const change = cellHighlights[hKey];
             const color = change ? (userColors[change.username] ?? '#3B82F6') : '#3B82F6';
+
+            // Prefer exact position from the afterRenderCell map (updated after wb.scroll re-render).
+            // Fall back to math for empty cells.
+            const mapEntry = cellRectMapRef.current.get(`${navHighlight.r}_${navHighlight.c}`);
+            let left: number, top: number, width: number, height: number;
+            if (mapEntry) {
+              left = cL + mapEntry.x; top = cT + mapEntry.y;
+              width = mapEntry.w;     height = mapEntry.h;
+            } else {
+              const merges: Record<string, { r: number; c: number; rs: number; cs: number }> =
+                ((latestSheetsRef.current ?? sheets)[navHighlight.sheetIdx]?.config?.merge) ?? {};
+              const m = merges[`${navHighlight.r}_${navHighlight.c}`];
+              const rect = getCellCSSRect(navHighlight.sheetIdx, navHighlight.r, navHighlight.c,
+                m ? { rs: m.rs, cs: m.cs } : undefined);
+              ({ left, top, width, height } = rect);
+            }
             return (
               <div
                 style={{
                   position: 'absolute',
-                  left:   rect.left,
-                  top:    rect.top,
-                  width:  rect.width,
-                  height: rect.height,
+                  left, top, width, height,
                   background: color + '44',
                   border: `2px solid ${color}`,
                   pointerEvents: 'none',
