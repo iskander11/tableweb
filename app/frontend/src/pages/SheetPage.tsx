@@ -362,54 +362,33 @@ export default function SheetPage() {
     const sbx = wrap?.querySelector('.luckysheet-scrollbar-x') as HTMLElement | null;
     const sby = wrap?.querySelector('.luckysheet-scrollbar-y') as HTMLElement | null;
 
-    // Step 1: ROUGH scroll computed from column widths / row heights — NOT FortuneSheet's
-    // wb.scroll({targetRow,targetColumn}), which mis-positions on sheets with frozen panes
-    // (that was the "thrown sideways" bug). We sum the sizes of all columns/rows before the
-    // target to get its absolute content offset, then scroll so it lands near the viewport
-    // center. This only needs to get the cell ON SCREEN — Step 2 refines it precisely.
+    // Scroll the cell to the viewport center with a PURE computed scroll: sum the column
+    // widths / row heights before the target to get its absolute content offset, place its
+    // center at the scrollbar's mid-point. Verified live to land dead-centre even with
+    // frozen rows/columns — the scrollbar works in full content px, so the frozen pane needs
+    // no special-casing. (The earlier measure-and-nudge refinement is gone: it double-applied
+    // a stale rect and overshot, throwing the view far past the target on distant cells.)
     const sheet = sheetsRef.current[sheetIndex] || sheetsRef.current[0];
     const colLen: Record<number, number> = sheet?.config?.columnlen || {};
     const rowLen: Record<number, number> = sheet?.config?.rowlen || {};
-    // Default cell size: borrow it from a currently-visible cell that has no size override,
-    // so we match whatever FortuneSheet is actually using (falls back to its 73×19 defaults).
-    let defW = 73, defH = 19;
-    for (const [k, rect] of cellRectMapRef.current) {
-      const [rr, cc] = k.split('_').map(Number);
-      if (colLen[cc] === undefined && rect.w > 0) defW = rect.w;
-      if (rowLen[rr] === undefined && rect.h > 0) defH = rect.h;
-    }
+    const DEFW = 73, DEFH = 19; // FortuneSheet defaults for cells without an explicit size
     let contentX = 0;
-    for (let k = 0; k < c; k++) contentX += colLen[k] ?? defW;
+    for (let k = 0; k < c; k++) contentX += colLen[k] ?? DEFW;
     let contentY = 0;
-    for (let k = 0; k < r; k++) contentY += rowLen[k] ?? defH;
-    const canvas0 = getCanvas();
-    if (sbx) sbx.scrollLeft = Math.max(0, contentX - (canvas0?.clientWidth ?? 800) / 2);
-    if (sby) sby.scrollTop = Math.max(0, contentY - (canvas0?.clientHeight ?? 600) / 2);
+    for (let k = 0; k < r; k++) contentY += rowLen[k] ?? DEFH;
+    const cellW = colLen[c] ?? DEFW;
+    const cellH = rowLen[r] ?? DEFH;
+    if (sbx) sbx.scrollLeft = Math.max(0, contentX + cellW / 2 - sbx.clientWidth / 2);
+    if (sby) sby.scrollTop = Math.max(0, contentY + cellH / 2 - sby.clientHeight / 2);
 
-    // Step 2: center the cell by MEASURING its actual rendered rect and nudging the
-    // scrollbars by the delta to the canvas center. Because we measure the real on-screen
-    // position, any frozen-row/column offset is already baked in — no special-casing the
-    // frozen pane. Returns true once it had a rect to act on.
-    const centerOnce = (): boolean => {
-      const canvas = getCanvas();
-      const rect = cellRectMapRef.current.get(`${r}_${c}`);
-      if (!canvas || !rect) return false;
-      const dx = (rect.x + rect.w / 2) - canvas.clientWidth / 2;
-      const dy = (rect.y + rect.h / 2) - canvas.clientHeight / 2;
-      if (sbx) sbx.scrollLeft = Math.max(0, sbx.scrollLeft + dx);
-      if (sby) sby.scrollTop = Math.max(0, sby.scrollTop + dy);
-      return true;
-    };
-
-    // Step 3: run a few centering passes (variable row heights make it converge over a
-    // couple of redraws), then read the settled rect and pulse-highlight the cell.
+    // After the scroll has rendered, read the cell's exact on-screen rect and pulse-highlight
+    // it. Best-effort: a few retries while the redraw settles, then give up quietly.
     let tries = 0;
     const tick = () => {
       tries += 1;
-      const centered = centerOnce();
       const rect = cellRectMapRef.current.get(`${r}_${c}`);
       const origin = getCanvasOrigin();
-      if (centered && rect && origin && tries >= 3) {
+      if (rect && origin) {
         const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
         const color = change ? userColor(userColors, change.username) : '#3B82F6';
         setNavHighlight({
@@ -422,7 +401,7 @@ export default function SheetPage() {
       }
     };
     setTimeout(tick, 150);
-  }, [cellHighlights, userColors, getCanvas, getCanvasOrigin]);
+  }, [cellHighlights, userColors, getCanvasOrigin]);
 
   // Note: change detection (diff + summary) is computed server-side on save.
 
