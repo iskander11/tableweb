@@ -115,8 +115,10 @@ export default function SheetPage() {
   const canvasOriginRef = useRef({ top: -1, left: 0 });
   // Kept for getCellRect fallback; set = canvasOriginRef + header offsets
   const gridOriginRef = useRef({ top: -1, left: -1 });
-  // Cell rect cache filled by FortuneSheet's cellRenderAfter hook (canvas-pixel coords)
+  // Cell rect cache filled by FortuneSheet's afterRenderCell hook (in canvas-pixel coords)
   const cellRectMapRef = useRef<Map<string, { x: number; y: number; w: number; h: number }>>(new Map());
+  // canvas.width / canvas.offsetWidth — converts canvas device-px to CSS-px
+  const canvasPxRatioRef = useRef(1);
   const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
@@ -279,9 +281,10 @@ export default function SheetPage() {
     const wrapper = workbookWrapperRef.current;
     if (!wrapper) return;
     const wRect = wrapper.getBoundingClientRect();
-    const canvases = Array.from(wrapper.querySelectorAll('canvas')).map(c => {
+    const rawCanvases = Array.from(wrapper.querySelectorAll('canvas'));
+    const canvases = rawCanvases.map(c => {
       const r = c.getBoundingClientRect();
-      return { top: r.top - wRect.top, left: r.left - wRect.left, w: c.offsetWidth, h: c.offsetHeight };
+      return { el: c, top: r.top - wRect.top, left: r.left - wRect.left, w: c.offsetWidth, h: c.offsetHeight };
     }).sort((a, b) => a.top - b.top || a.left - b.left);
 
     const pick = canvases.length > 1
@@ -291,9 +294,15 @@ export default function SheetPage() {
     if (pick) {
       canvasOriginRef.current = { top: pick.top, left: pick.left };
       gridOriginRef.current   = { top: pick.top + COL_HEADER_H, left: pick.left + ROW_HEADER_W };
+      // Ratio between canvas device-pixel size and CSS size
+      // afterRenderCell gives device-pixel coords; divide by this ratio to get CSS px
+      const ratio = pick.el.width / (pick.el.offsetWidth || 1);
+      canvasPxRatioRef.current = ratio > 0 ? ratio : 1;
+      console.log('[Canvas] offsetWidth:', pick.el.offsetWidth, 'attr width:', pick.el.width, 'ratio:', canvasPxRatioRef.current);
     } else {
       canvasOriginRef.current = { top: editor ? 68 : 28, left: 0 };
       gridOriginRef.current   = { top: editor ? 88 : 48, left: ROW_HEADER_W };
+      canvasPxRatioRef.current = window.devicePixelRatio || 1;
     }
   }, [editor, ROW_HEADER_W, COL_HEADER_H]);
 
@@ -350,14 +359,16 @@ export default function SheetPage() {
 
     // Find the cell whose rendered rect contains (cx, cy)
     // cellRectMapRef is populated by the cellRenderAfter hook on every FortuneSheet redraw.
-    // Coords are canvas-local (already account for virtual scroll).
+    // afterRenderCell coords are in canvas device-pixels; divide by ratio to get CSS px
+    const ratio = canvasPxRatioRef.current;
     const map = cellRectMapRef.current;
     let foundKey: string | null = null;
     let foundRect: { x: number; y: number; w: number; h: number } | null = null;
 
     for (const [key, rect] of map) {
-      if (cx >= rect.x && cx < rect.x + rect.w &&
-          cy >= rect.y && cy < rect.y + rect.h) {
+      const rx = rect.x / ratio, ry = rect.y / ratio;
+      const rw = rect.w / ratio, rh = rect.h / ratio;
+      if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {
         foundKey = key;
         foundRect = rect;
         break;
@@ -370,15 +381,14 @@ export default function SheetPage() {
     const hKey = `${activeSheetIdx}_${row}_${col}`;
     const change = cellHighlights[hKey];
     const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
-    const dpr = window.devicePixelRatio || 1;
     const cL = canvasOriginRef.current.left;
     const cT = canvasOriginRef.current.top;
 
     setHoverOverlay({
-      left:   cL + foundRect.x / dpr,
-      top:    cT + foundRect.y / dpr,
-      width:  foundRect.w / dpr,
-      height: foundRect.h / dpr,
+      left:   cL + foundRect.x / ratio,
+      top:    cT + foundRect.y / ratio,
+      width:  foundRect.w / ratio,
+      height: foundRect.h / ratio,
       color, username: change?.username ?? null,
     });
   }, [activeSheetIdx, cellHighlights, userColors, measureGridOrigin]);
@@ -810,7 +820,14 @@ export default function SheetPage() {
             showFormulaBar
             allowEdit={editor}
             hooks={{
+              beforeRenderCellArea: (_cells, _ctx) => {
+                cellRectMapRef.current.clear();
+                return true;
+              },
               afterRenderCell: (_cell, cellInfo, _ctx) => {
+                if (cellInfo.row === 0 && cellInfo.column === 0) {
+                  console.log('[afterRenderCell(0,0)] startX:', cellInfo.startX, 'startY:', cellInfo.startY, 'endX:', cellInfo.endX, 'endY:', cellInfo.endY, 'ratio:', canvasPxRatioRef.current);
+                }
                 cellRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
                   x: cellInfo.startX, y: cellInfo.startY,
                   w: cellInfo.endX - cellInfo.startX,
