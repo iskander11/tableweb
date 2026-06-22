@@ -276,37 +276,37 @@ export default function SheetPage() {
       return { top: r.top - wRect.top, left: r.left - wRect.left, w: c.offsetWidth, h: c.offsetHeight };
     }).sort((a, b) => a.top - b.top || a.left - b.left);
 
+    // DEBUG — remove after calibration
+    console.log('[GridOrigin] wrapperSize:', Math.round(wRect.width), 'x', Math.round(wRect.height));
+    console.log('[GridOrigin] canvases:', canvases.map(c => `top=${Math.round(c.top)} left=${Math.round(c.left)} ${Math.round(c.w)}x${Math.round(c.h)}`));
+
     if (canvases.length === 0) {
-      // No canvas yet — estimate (toolbar≈40px + formula bar≈28px + col header 20px)
-      gridOriginRef.current = {
-        top:  (editor ? 88 : 48),
-        left: ROW_HEADER_W,
-      };
+      gridOriginRef.current = { top: (editor ? 88 : 48), left: ROW_HEADER_W };
+      console.log('[GridOrigin] fallback (no canvas):', gridOriginRef.current);
       return;
     }
 
     if (canvases.length === 1) {
-      // Single canvas renders headers + cells; first cell starts at (ROW_HEADER_W, COL_HEADER_H) inside it
       gridOriginRef.current = {
         top:  canvases[0].top  + COL_HEADER_H,
         left: canvases[0].left + ROW_HEADER_W,
       };
+      console.log('[GridOrigin] single canvas + headers:', gridOriginRef.current);
       return;
     }
 
-    // Multiple canvases: one is the main cell grid (not at top=0 and not at left=0)
     const cellCanvas = canvases.find(c => c.top > 10 && c.left > 10);
     if (cellCanvas) {
-      // This canvas starts exactly at the first data cell
       gridOriginRef.current = { top: cellCanvas.top, left: cellCanvas.left };
+      console.log('[GridOrigin] multi-canvas, cell canvas found:', gridOriginRef.current);
       return;
     }
 
-    // Fallback: topmost canvas + header offsets
     gridOriginRef.current = {
       top:  canvases[0].top  + COL_HEADER_H,
       left: canvases[0].left + ROW_HEADER_W,
     };
+    console.log('[GridOrigin] multi-canvas fallback:', gridOriginRef.current);
   }, [editor, ROW_HEADER_W, COL_HEADER_H]);
 
   // Compute cell rect (relative to workbookWrapper) for a given sheet/row/col.
