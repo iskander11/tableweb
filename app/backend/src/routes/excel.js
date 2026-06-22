@@ -19,6 +19,9 @@ router.get('/:id/import-progress', authenticate, (req, res) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
+    // Tell nginx not to buffer this response, so progress events reach the client
+    // immediately and the bar animates smoothly instead of jumping 2%→100% at the end.
+    'X-Accel-Buffering': 'no',
   });
   res.flushHeaders();
 

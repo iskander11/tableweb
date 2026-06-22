@@ -91,6 +91,11 @@ server {
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_cache_bypass $http_upgrade;
+        # Stream Server-Sent Events (import progress) without buffering so the
+        # progress bar animates live instead of arriving all at once.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
     }
 
     # WebSocket
