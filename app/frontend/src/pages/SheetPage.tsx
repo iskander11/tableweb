@@ -39,6 +39,9 @@ function buildSheets(sheetMeta: any) {
   return (sheetMeta.sheets || []).map((s: any, i: number) => {
     const data = s.data || {};
     const sheet: any = {
+      // Stable id (shared across clients) so live-presence cursors map to the same sheet —
+      // otherwise FortuneSheet auto-generates a different id per client.
+      id: `sheet_${i}`,
       name: data.name || `Sheet${i + 1}`,
       index: i,
       status: 1,
@@ -161,12 +164,18 @@ export default function SheetPage() {
   // heights without a stale closure (works for readers too, where latestSheetsRef is null).
   const sheetsRef = useRef<any[]>([]);
   useEffect(() => { sheetsRef.current = sheets; }, [sheets]);
+  // Always-current mirror of userColors / online users for use inside stable socket handlers.
+  const userColorsRef = useRef<Record<string, string>>({});
+  const onlineUsersRef = useRef<OnlineUser[]>([]);
   // FortuneSheet fires onChange during init — ignore until ready, then treat first call as baseline
   const acceptChangesRef = useRef(false);
   const baselineTakenRef = useRef(false);
   const { version: fontsVersion } = useFonts();
 
   const editor = isEditor();
+
+  useEffect(() => { userColorsRef.current = userColors; }, [userColors]);
+  useEffect(() => { onlineUsersRef.current = onlineUsers; }, [onlineUsers]);
 
   // Local draft (autosaved to localStorage) so unsaved work survives a tab crash/close.
   const draftKey = id ? `tableweb_draft_${id}` : '';
@@ -324,9 +333,28 @@ export default function SheetPage() {
     const socket = io('/', { auth: { token } });
     socketRef.current = socket;
     socket.emit('join-sheet', id);
-    socket.on('room-users', setOnlineUsers);
+    socket.on('room-users', (users: OnlineUser[]) => {
+      // Remove presence cursors of anyone who just left the room
+      const goneUsernames = onlineUsersRef.current
+        .filter((p) => !users.some((u) => u.username === p.username))
+        .map((p) => p.username);
+      if (goneUsernames.length) {
+        try { workbookRef.current?.removePresences?.(goneUsernames.map((u) => ({ userId: u }))); } catch { /* ignore */ }
+      }
+      setOnlineUsers(users);
+    });
     socket.on('cell-change', ({ changes }) => {
       workbookRef.current?.applyOp?.(changes);
+    });
+    // Live presence: show other users' selection cursors (FortuneSheet addPresences).
+    socket.on('presence', ({ username, tabId, r, c }: { username: string; tabId: string; r: number; c: number }) => {
+      const wb = workbookRef.current;
+      if (!wb?.addPresences) return;
+      const color = userColor(userColorsRef.current, username);
+      try {
+        wb.removePresences?.([{ userId: username }]);
+        wb.addPresences([{ userId: username, username, color, selection: { r, c }, sheetId: tabId }]);
+      } catch { /* ignore */ }
     });
     socket.on('user-color-changed', ({ username, color }: { username: string; color: string }) => {
       setUserColors((prev) => ({ ...prev, [username]: color }));
@@ -585,6 +613,14 @@ export default function SheetPage() {
   // canvas top-left). FortuneSheet's canvas context is pre-scaled by devicePixelRatio,
   // so startX/startY/endX/endY are already CSS px — no ratio conversion.
   const workbookHooks = useMemo(() => ({
+    // Broadcast our selection so other users see a live cursor. tabId is FortuneSheet's
+    // (now stable) sheet id; r/c are the active cell of the selection range.
+    afterSelectionChange: (tabId: string, sel: any) => {
+      const r = sel?.row?.[0];
+      const c = sel?.column?.[0];
+      if (typeof r !== 'number' || typeof c !== 'number') return;
+      socketRef.current?.emit('presence', { roomId: id, tabId, r, c });
+    },
     afterRenderCell: (_cell: any, cellInfo: any, _ctx: any) => {
       const r = cellInfo.row as number;
       const c = cellInfo.column as number;

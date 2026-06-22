@@ -80,6 +80,12 @@ io.on('connection', (socket) => {
     socket.to(sheetId).emit('cell-change', { userId: socket.user.id, changes });
   });
 
+  // Relay a user's selection (live-presence cursor) to others in the same sheet room.
+  socket.on('presence', ({ roomId, tabId, r, c }) => {
+    if (!roomId) return;
+    socket.to(roomId).emit('presence', { username: socket.user.username, tabId, r, c });
+  });
+
   // Broadcast color change to all connected clients
   socket.on('update-color', ({ color }) => {
     io.emit('user-color-changed', { username: socket.user.username, color });
