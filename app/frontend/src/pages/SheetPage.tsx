@@ -380,6 +380,10 @@ export default function SheetPage() {
     if (!foundKey || !foundRect) { setHoverOverlay(null); return; }
 
     const [row, col] = foundKey.split('_').map(Number);
+    console.log('[HOVER found] key:', foundKey, 'cx:', cx.toFixed(1), 'cy:', cy.toFixed(1),
+      'cell CSS rect:', (foundRect.x/ratio).toFixed(1), (foundRect.y/ratio).toFixed(1),
+      (foundRect.w/ratio).toFixed(1), (foundRect.h/ratio).toFixed(1),
+      'canvasTop:', canvasOriginRef.current.top, 'canvasLeft:', canvasOriginRef.current.left);
     const hKey = `${activeSheetIdx}_${row}_${col}`;
     const change = cellHighlights[hKey];
     const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
