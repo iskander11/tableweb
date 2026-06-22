@@ -309,26 +309,44 @@ export default function SheetPage() {
     console.log('[GridOrigin] multi-canvas fallback:', gridOriginRef.current);
   }, [editor, ROW_HEADER_W, COL_HEADER_H]);
 
+  // Read current scroll state directly from DOM — more reliable than event-based tracking
+  // because FortuneSheet may redraw canvas via JS without firing standard scroll events.
+  const readScrollState = useCallback((): { top: number; left: number } => {
+    const wrapper = workbookWrapperRef.current;
+    if (!wrapper) return { top: 0, left: 0 };
+    let top = 0, left = 0;
+    for (const el of Array.from(wrapper.querySelectorAll('*')) as HTMLElement[]) {
+      if (el.scrollTop  > top)  top  = el.scrollTop;
+      if (el.scrollLeft > left) left = el.scrollLeft;
+    }
+    return { top, left };
+  }, []);
+
+  // Default row/col sizes from sheet config (FortuneSheet may store these)
+  const getSheetDefaults = useCallback((sheet: any) => ({
+    DW: sheet?.defaultColWidth  ?? sheet?.config?.defaultcolwidth  ?? 73,
+    DH: sheet?.defaultRowHeight ?? sheet?.config?.defaultrowheight ?? 19,
+  }), []);
+
   // Compute cell rect (relative to workbookWrapper) for a given sheet/row/col.
-  // gridOriginRef already points to first data cell — no additional header offset needed.
   const getCellRect = useCallback((sheetIdx: number, row: number, col: number) => {
     if (gridOriginRef.current.top < 0) measureGridOrigin();
     if (gridOriginRef.current.top < 0) return null;
     const curSheet = (latestSheetsRef.current ?? sheets)[sheetIdx];
     const colLens = curSheet?.config?.columnlen ?? {};
     const rowLens = curSheet?.config?.rowlen ?? {};
-    const DW = 73, DH = 19;
+    const { DW, DH } = getSheetDefaults(curSheet);
     let xAcc = 0; for (let i = 0; i < col; i++) xAcc += (colLens[i] ?? DW);
     let yAcc = 0; for (let i = 0; i < row; i++) yAcc += (rowLens[i] ?? DH);
     const { top: oT, left: oL } = gridOriginRef.current;
-    const { top: st, left: sl } = sheetScrollRef.current;
+    const { top: st, left: sl } = readScrollState();
     return {
       left:   oL - sl + xAcc,
       top:    oT - st + yAcc,
       width:  colLens[col] ?? DW,
       height: rowLens[row] ?? DH,
     };
-  }, [sheets, measureGridOrigin]);
+  }, [sheets, measureGridOrigin, readScrollState, getSheetDefaults]);
 
   const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const wrapper = workbookWrapperRef.current;
@@ -340,9 +358,9 @@ export default function SheetPage() {
     const y = e.clientY - wRect.top;
 
     const { top: oT, left: oL } = gridOriginRef.current;
-    const { top: st, left: sl } = sheetScrollRef.current;
+    const { top: st, left: sl } = readScrollState();
 
-    // Offset inside the cell grid — gridOriginRef is already at first data cell
+    // Offset inside the cell grid
     const adjX = x - oL + sl;
     const adjY = y - oT + st;
 
@@ -351,12 +369,18 @@ export default function SheetPage() {
     const curSheet = (latestSheetsRef.current ?? sheets)[activeSheetIdx];
     const colLens = curSheet?.config?.columnlen ?? {};
     const rowLens = curSheet?.config?.rowlen ?? {};
-    const DW = 73, DH = 19;
+    const { DW, DH } = getSheetDefaults(curSheet);
 
     let col = 0, xAcc = 0;
     while (col < 500) { const w = colLens[col] ?? DW; if (xAcc + w > adjX) break; xAcc += w; col++; }
     let row = 0, yAcc = 0;
     while (row < 2000) { const h = rowLens[row] ?? DH; if (yAcc + h > adjY) break; yAcc += h; row++; }
+
+    // DEBUG — remove after calibration
+    if (row < 3 && col < 3) {
+      const { DW: dw, DH: dh } = getSheetDefaults(curSheet);
+      console.log(`[Hover] mouse(${Math.round(x)},${Math.round(y)}) scroll(${Math.round(sl)},${Math.round(st)}) → row=${row} col=${col} defaults(DW=${dw},DH=${dh}) rowlen:`, JSON.stringify(curSheet?.config?.rowlen ?? {}));
+    }
 
     const hKey = `${activeSheetIdx}_${row}_${col}`;
     const change = cellHighlights[hKey];
