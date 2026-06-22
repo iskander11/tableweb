@@ -157,6 +157,10 @@ export default function SheetPage() {
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
   const lastSavedSheetsRef = useRef<any[] | null>(null);
+  // Always-current mirror of `sheets` so navigateToCell can read column widths / row
+  // heights without a stale closure (works for readers too, where latestSheetsRef is null).
+  const sheetsRef = useRef<any[]>([]);
+  useEffect(() => { sheetsRef.current = sheets; }, [sheets]);
   // FortuneSheet fires onChange during init — ignore until ready, then treat first call as baseline
   const acceptChangesRef = useRef(false);
   const baselineTakenRef = useRef(false);
@@ -353,18 +357,39 @@ export default function SheetPage() {
     const wb = workbookRef.current as any;
     // Native selection — FortuneSheet draws its own highlight box exactly on the cell.
     try { wb?.setSelection?.([{ row: [r, r], column: [c, c] }]); } catch (_) {}
-    // Step 1: bring the cell to the top-left (sets the scrollbars to its content position).
-    try { wb?.scroll?.({ targetRow: r, targetColumn: c }); } catch (_) {}
 
     const wrap = workbookWrapperRef.current;
     const sbx = wrap?.querySelector('.luckysheet-scrollbar-x') as HTMLElement | null;
     const sby = wrap?.querySelector('.luckysheet-scrollbar-y') as HTMLElement | null;
 
+    // Step 1: ROUGH scroll computed from column widths / row heights — NOT FortuneSheet's
+    // wb.scroll({targetRow,targetColumn}), which mis-positions on sheets with frozen panes
+    // (that was the "thrown sideways" bug). We sum the sizes of all columns/rows before the
+    // target to get its absolute content offset, then scroll so it lands near the viewport
+    // center. This only needs to get the cell ON SCREEN — Step 2 refines it precisely.
+    const sheet = sheetsRef.current[sheetIndex] || sheetsRef.current[0];
+    const colLen: Record<number, number> = sheet?.config?.columnlen || {};
+    const rowLen: Record<number, number> = sheet?.config?.rowlen || {};
+    // Default cell size: borrow it from a currently-visible cell that has no size override,
+    // so we match whatever FortuneSheet is actually using (falls back to its 73×19 defaults).
+    let defW = 73, defH = 19;
+    for (const [k, rect] of cellRectMapRef.current) {
+      const [rr, cc] = k.split('_').map(Number);
+      if (colLen[cc] === undefined && rect.w > 0) defW = rect.w;
+      if (rowLen[rr] === undefined && rect.h > 0) defH = rect.h;
+    }
+    let contentX = 0;
+    for (let k = 0; k < c; k++) contentX += colLen[k] ?? defW;
+    let contentY = 0;
+    for (let k = 0; k < r; k++) contentY += rowLen[k] ?? defH;
+    const canvas0 = getCanvas();
+    if (sbx) sbx.scrollLeft = Math.max(0, contentX - (canvas0?.clientWidth ?? 800) / 2);
+    if (sby) sby.scrollTop = Math.max(0, contentY - (canvas0?.clientHeight ?? 600) / 2);
+
     // Step 2: center the cell by MEASURING its actual rendered rect and nudging the
     // scrollbars by the delta to the canvas center. Because we measure the real on-screen
     // position, any frozen-row/column offset is already baked in — no special-casing the
-    // frozen pane (the old "shift by half the viewport" math broke exactly here, throwing
-    // the view sideways on tables with frozen areas). Returns true once it had a rect to act on.
+    // frozen pane. Returns true once it had a rect to act on.
     const centerOnce = (): boolean => {
       const canvas = getCanvas();
       const rect = cellRectMapRef.current.get(`${r}_${c}`);
