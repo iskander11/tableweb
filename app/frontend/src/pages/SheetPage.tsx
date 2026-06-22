@@ -168,6 +168,71 @@ export default function SheetPage() {
 
   const editor = isEditor();
 
+  // Local draft (autosaved to localStorage) so unsaved work survives a tab crash/close.
+  const draftKey = id ? `tableweb_draft_${id}` : '';
+  const [draftInfo, setDraftInfo] = useState<{ savedAt: string } | null>(null);
+  const isDirtyRef = useRef(false);
+  useEffect(() => { isDirtyRef.current = isDirty; }, [isDirty]);
+
+  // Warn before leaving the tab while there are unsaved changes (manual save only).
+  useEffect(() => {
+    if (!editor) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      if (isDirtyRef.current) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [editor]);
+
+  // Autosave a local draft every 5s while there are unsaved edits. Cleared on a real save.
+  useEffect(() => {
+    if (!editor || !draftKey) return;
+    const iv = setInterval(() => {
+      if (!isDirtyRef.current) return;
+      const all = latestSheetsRef.current;
+      if (!all) return;
+      try {
+        localStorage.setItem(draftKey, JSON.stringify({ savedAt: new Date().toISOString(), sheets: all }));
+      } catch { /* quota exceeded — skip this tick */ }
+    }, 5000);
+    return () => clearInterval(iv);
+  }, [editor, draftKey]);
+
+  // On open, surface any leftover draft (its mere presence means it was never saved).
+  useEffect(() => {
+    if (!editor || !draftKey) return;
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.sheets?.length) setDraftInfo({ savedAt: parsed.savedAt });
+      }
+    } catch { /* ignore corrupt draft */ }
+  }, [editor, draftKey]);
+
+  const restoreDraft = useCallback(() => {
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (!raw) { setDraftInfo(null); return; }
+      const parsed = JSON.parse(raw);
+      if (parsed?.sheets?.length) {
+        acceptChangesRef.current = false;
+        baselineTakenRef.current = false;
+        setSheets(parsed.sheets);
+        latestSheetsRef.current = parsed.sheets;
+        setWorkbookKey((k) => k + 1);
+        setIsDirty(true);
+        setTimeout(() => { acceptChangesRef.current = true; }, 800);
+      }
+    } catch { /* ignore */ }
+    setDraftInfo(null);
+  }, [draftKey]);
+
+  const discardDraft = useCallback(() => {
+    try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    setDraftInfo(null);
+  }, [draftKey]);
+
   // Load user colors on mount
   useEffect(() => {
     api.get('/auth/user-colors').then((r) => {
@@ -435,9 +500,12 @@ export default function SheetPage() {
     setSaveState('saving');
     saveAll(all);
     setIsDirty(false);
+    // Work is now persisted server-side — drop the local draft and its restore banner.
+    try { if (draftKey) localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    setDraftInfo(null);
     setSaveState('saved');
     setTimeout(() => setSaveState('idle'), 2000);
-  }, [saveAll, sheets]);
+  }, [saveAll, sheets, draftKey]);
 
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;
@@ -703,6 +771,16 @@ export default function SheetPage() {
         <div className="bg-blue-50 border-b border-blue-100 px-4 py-2 flex items-center gap-2 text-sm text-blue-700 shrink-0">
           <Info size={15} className="shrink-0" />
           <span>Вы в режиме чтения — редактирование недоступно.</span>
+        </div>
+      )}
+
+      {/* Draft recovery banner — a leftover local draft means a previous session wasn't saved */}
+      {editor && draftInfo && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center gap-2 text-sm text-amber-800 shrink-0 flex-wrap">
+          <Info size={15} className="shrink-0" />
+          <span>Найден несохранённый черновик от <strong>{formatTime(draftInfo.savedAt)}</strong>.</span>
+          <button onClick={restoreDraft} className="ml-1 rounded-md border border-amber-300 bg-amber-100 px-2 py-0.5 text-xs font-medium hover:bg-amber-200 transition">Восстановить</button>
+          <button onClick={discardDraft} className="rounded-md border border-amber-200 px-2 py-0.5 text-xs text-amber-600 hover:bg-amber-100 transition">Отклонить</button>
         </div>
       )}
 
