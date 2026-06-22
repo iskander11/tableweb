@@ -22,6 +22,9 @@ import archiver from 'archiver';
 
 dotenv.config();
 
+// Max change_log entries retained per spreadsheet (older ones are pruned on each save).
+const CHANGELOG_LIMIT = Number(process.env.CHANGELOG_LIMIT) || 200;
+
 const app = express();
 const httpServer = createServer(app);
 
@@ -116,6 +119,17 @@ io.on('connection', (socket) => {
           [sheetId, sheetIndex, socket.user.id, socket.user.username, summary || null,
            changedCells ? JSON.stringify(changedCells) : null]
         );
+        // Retention: keep only the newest CHANGELOG_LIMIT entries per spreadsheet so the
+        // history table can't grow unbounded and slow down queries over time.
+        await query(
+          `DELETE FROM change_log
+           WHERE spreadsheet_id = $1
+             AND id NOT IN (
+               SELECT id FROM change_log WHERE spreadsheet_id = $1
+               ORDER BY saved_at DESC LIMIT $2
+             )`,
+          [sheetId, CHANGELOG_LIMIT]
+        ).catch(() => { /* retention is best-effort; never block a save */ });
         const entry = {
           username: socket.user.username,
           sheet_index: sheetIndex,
