@@ -12,6 +12,16 @@ interface BackupItem {
   username: string; backup_type: string; sheet_name: string | null;
 }
 
+function nextWeeklyBackup(): string {
+  const now = new Date();
+  const next = new Date(now);
+  // Sunday = 0; find next Sunday
+  const daysUntilSunday = (7 - now.getDay()) % 7 || 7;
+  next.setDate(now.getDate() + daysUntilSunday);
+  next.setHours(2, 0, 0, 0);
+  return next.toLocaleString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+}
+
 function formatBytes(n: number) {
   if (!n) return '0 Б';
   const u = ['Б', 'КБ', 'МБ', 'ГБ'];
@@ -345,6 +355,13 @@ export default function AdminPage() {
             >
               <Archive size={14} /> {createBackup.isPending ? 'Создание…' : 'Создать бэкап'}
             </button>
+          </div>
+
+          {/* Next weekly backup info */}
+          <div className="mb-4 text-sm text-gray-500 flex items-center gap-1.5">
+            <span className="inline-block w-2 h-2 rounded-full bg-blue-400 shrink-0" />
+            Автоматический недельный бэкап всех таблиц: <strong className="text-gray-700 ml-1">{nextWeeklyBackup()}</strong>
+            <span className="text-gray-400 ml-1">(каждое воскресенье в 02:00)</span>
           </div>
 
           {allSheets.length === 0 && (
