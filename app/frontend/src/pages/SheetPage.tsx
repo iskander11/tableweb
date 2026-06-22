@@ -316,8 +316,12 @@ export default function SheetPage() {
     try { wb?.activateSheet?.(opts); } catch (_) {}
     // Native selection — FortuneSheet draws its own highlight box exactly on the cell
     try { wb?.setSelection?.([{ row: [r, r], column: [c, c] }], opts); } catch (_) {}
-    // Native scroll to bring it into view
-    try { wb?.scroll?.({ targetRow: r, targetColumn: c }); } catch (_) {}
+
+    // Scroll AFTER the selection render commits, so FortuneSheet can't reset scroll on us.
+    // Re-assert it a second time to survive any intermediate redraw.
+    const doScroll = () => { try { wb?.scroll?.({ targetRow: r, targetColumn: c }); } catch (_) {} };
+    setTimeout(doScroll, 0);
+    setTimeout(doScroll, 90);
 
     // Poll the cell-rect map until the (now-scrolled-into-view) cell appears, then pulse it.
     // Redraw timing varies, so retry a few times instead of a single fixed delay.
@@ -334,11 +338,11 @@ export default function SheetPage() {
           width: rect.w, height: rect.h, color,
         });
         setTimeout(() => setNavHighlight(null), 2500);
-      } else if (tries < 15) {
+      } else if (tries < 20) {
         setTimeout(tick, 80);
       }
     };
-    setTimeout(tick, 120);
+    setTimeout(tick, 160);
   }, [cellHighlights, userColors, getCanvasOrigin]);
 
   // Note: change detection (diff + summary) is computed server-side on save.
@@ -462,15 +466,22 @@ export default function SheetPage() {
         w: cellInfo.endX - cellInfo.startX,
         h: cellInfo.endY - cellInfo.startY,
       });
-      // Swap the freshly-collected map in shortly after the last cell of a redraw pass
-      if (renderBatchTimerRef.current !== null) clearTimeout(renderBatchTimerRef.current);
-      renderBatchTimerRef.current = setTimeout(() => {
-        cellRectMapRef.current = pendingRectMapRef.current;
-        pendingRectMapRef.current = new Map();
-        renderBatchTimerRef.current = null;
-        // Notify React so persistent edited-cell overlays reposition after the redraw
-        setMapVersion((v) => v + 1);
-      }, 50);
+      // All cells of a redraw pass fire synchronously; schedule ONE microtask that runs
+      // right after the pass to swap in the complete map. Using a microtask (not a debounce
+      // timer) means it still fires during CONTINUOUS scrolling — a debounce would keep
+      // resetting and never commit, freezing overlays at stale positions.
+      if (renderBatchTimerRef.current === null) {
+        renderBatchTimerRef.current = 1 as any;
+        Promise.resolve().then(() => {
+          cellRectMapRef.current = pendingRectMapRef.current;
+          pendingRectMapRef.current = new Map();
+          renderBatchTimerRef.current = null;
+          // Notify React so persistent edited-cell overlays reposition with the redraw
+          setMapVersion((v) => v + 1);
+          // The view changed (scroll/zoom/edit) — drop the stale cursor hover box
+          setHoverOverlay(null);
+        });
+      }
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -681,27 +692,28 @@ export default function SheetPage() {
               const left = origin.left + rect.x;
               const top = origin.top + rect.y;
               items.push(
-                <div key={hKey} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 49 }}>
-                  {/* Colored cell box + username bottom-left */}
-                  <div style={{
-                    position: 'absolute', left, top, width: rect.w, height: rect.h,
-                    background: color + '22', border: `1.5px solid ${color}`,
-                    boxSizing: 'border-box', display: 'flex', alignItems: 'flex-end',
-                    overflow: 'hidden',
-                  }}>
-                    <span style={{
-                      fontSize: 9, lineHeight: '10px', color, padding: '0 2px 1px',
-                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                      maxWidth: '100%', fontWeight: 600,
-                    }}>{change.username}</span>
-                  </div>
-                  {/* Date/time pill to the right of the cell */}
+                <div key={hKey} style={{
+                  position: 'absolute', left, top, width: rect.w, height: rect.h,
+                  background: color + '22', border: `1.5px solid ${color}`,
+                  boxSizing: 'border-box', overflow: 'hidden',
+                  pointerEvents: 'none', zIndex: 49,
+                }}>
+                  {/* Date/time — inside the cell, top-right */}
                   <span style={{
-                    position: 'absolute', left: left + rect.w + 3, top: top + 1,
-                    fontSize: 9, lineHeight: '12px', color: '#475569',
-                    background: '#ffffffEE', border: '1px solid #e2e8f0', borderRadius: 4,
-                    padding: '0 4px', whiteSpace: 'nowrap', boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
+                    position: 'absolute', top: 0, right: 0,
+                    fontSize: 8, lineHeight: '10px', color: '#475569',
+                    background: '#ffffffE6', borderLeft: '1px solid #e2e8f0',
+                    borderBottom: '1px solid #e2e8f0', borderBottomLeftRadius: 3,
+                    padding: '0 2px', whiteSpace: 'nowrap', maxWidth: '100%',
+                    overflow: 'hidden', textOverflow: 'ellipsis',
                   }}>{formatTime(change.saved_at)}</span>
+                  {/* Username — inside the cell, bottom-left */}
+                  <span style={{
+                    position: 'absolute', bottom: 0, left: 0,
+                    fontSize: 9, lineHeight: '10px', color, padding: '0 2px 1px',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    maxWidth: '100%', fontWeight: 600,
+                  }}>{change.username}</span>
                 </div>
               );
             }
