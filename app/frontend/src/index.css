@@ -10,9 +10,11 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   50%       { opacity: 0.3; }
 }
 
-/* Excel-like thin "+" cursor over the grid cell area. FortuneSheet sets an inline
-   cursor:default on this element, so !important is needed to override it. Resize and
-   fill handles are separate child elements with their own cursor, so they still work. */
-.fortune-cell-area {
+/* Excel-like thin "+" cursor over the grid cell area. The grid is drawn on
+   canvas.fortune-sheet-canvas; FortuneSheet sets an inline cursor on it, so
+   !important is needed. Column/row resize happens over the header strips (separate
+   elements with their own cursor), so those still show the resize arrows. */
+canvas.fortune-sheet-canvas,
+.luckysheet-cell-main {
   cursor: cell !important;
 }
