@@ -12,11 +12,7 @@ export function useSocketColorSync(onColorChange: (username: string, color: stri
   useEffect(() => {
     if (!token) return;
     if (!colorSocket || colorSocket.disconnected) {
-      colorSocket = io(import.meta.env.VITE_API_URL || window.location.origin, {
-        auth: { token },
-        path: '/socket.io',
-        transports: ['websocket'],
-      });
+      colorSocket = io('/', { auth: { token } });
     }
 
     const handler = ({ username, color }: { username: string; color: string }) => {
