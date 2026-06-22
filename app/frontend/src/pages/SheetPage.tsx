@@ -125,6 +125,16 @@ export default function SheetPage() {
   const activeSheetIdxRef = useRef(0);
   // Keep ref in sync so stable hooks can read current sheet index
   useEffect(() => { activeSheetIdxRef.current = activeSheetIdx; }, [activeSheetIdx]);
+  // True when the active sheet has any edited cells → gates per-frame overlay re-renders
+  const hasOverlaysRef = useRef(false);
+  // Last-known rect per edited cell, for smooth fade-out when it scrolls out of view
+  const overlaySeenRef = useRef<Map<string, { left: number; top: number; w: number; h: number; t: number }>>(new Map());
+  useEffect(() => {
+    const prefix = `${activeSheetIdx}_`;
+    hasOverlaysRef.current = Object.keys(cellHighlights).some((k) => k.startsWith(prefix));
+  }, [cellHighlights, activeSheetIdx]);
+  // Drop cached overlay positions when switching sheets (avoid ghosts from the previous sheet)
+  useEffect(() => { overlaySeenRef.current = new Map(); }, [activeSheetIdx]);
   const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
@@ -149,8 +159,16 @@ export default function SheetPage() {
   useEffect(() => {
     cellRectMapRef.current = new Map();
     pendingRectMapRef.current = new Map();
+    overlaySeenRef.current = new Map();
     setHoverOverlay(null);
   }, [workbookKey]);
+
+  // Cancel any pending overlay-update frame on unmount
+  useEffect(() => () => {
+    if (renderBatchTimerRef.current !== null) {
+      cancelAnimationFrame(renderBatchTimerRef.current as unknown as number);
+    }
+  }, []);
 
   useEffect(() => {
     if (fontsVersion > 0) {
@@ -311,17 +329,15 @@ export default function SheetPage() {
     setNavHighlight(null);
 
     const wb = workbookRef.current as any;
-    const opts = { index: sheetIndex };
-    // Switch to the target sheet if needed (no-op when already active)
-    try { wb?.activateSheet?.(opts); } catch (_) {}
-    // Native selection — FortuneSheet draws its own highlight box exactly on the cell
-    try { wb?.setSelection?.([{ row: [r, r], column: [c, c] }], opts); } catch (_) {}
+    // Native selection — FortuneSheet draws its own highlight box exactly on the cell.
+    // (No activateSheet — calling it resets scroll to the top-left, which threw nav off.)
+    try { wb?.setSelection?.([{ row: [r, r], column: [c, c] }]); } catch (_) {}
 
-    // Scroll AFTER the selection render commits, so FortuneSheet can't reset scroll on us.
-    // Re-assert it a second time to survive any intermediate redraw.
+    // Scroll to the cell. Re-assert across a couple of frames so a redraw can't undo it.
     const doScroll = () => { try { wb?.scroll?.({ targetRow: r, targetColumn: c }); } catch (_) {} };
-    setTimeout(doScroll, 0);
-    setTimeout(doScroll, 90);
+    doScroll();
+    setTimeout(doScroll, 60);
+    setTimeout(doScroll, 160);
 
     // Poll the cell-rect map until the (now-scrolled-into-view) cell appears, then pulse it.
     // Redraw timing varies, so retry a few times instead of a single fixed delay.
@@ -466,24 +482,53 @@ export default function SheetPage() {
         w: cellInfo.endX - cellInfo.startX,
         h: cellInfo.endY - cellInfo.startY,
       });
-      // All cells of a redraw pass fire synchronously; schedule ONE microtask that runs
-      // right after the pass to swap in the complete map. Using a microtask (not a debounce
-      // timer) means it still fires during CONTINUOUS scrolling — a debounce would keep
-      // resetting and never commit, freezing overlays at stale positions.
+      // Coalesce a whole redraw pass (and continuous scrolling) into ONE update per animation
+      // frame via rAF. A debounce would never commit during continuous scroll; an unthrottled
+      // microtask fires many times per frame and floods React with renders (→ freeze/crash).
       if (renderBatchTimerRef.current === null) {
-        renderBatchTimerRef.current = 1 as any;
-        Promise.resolve().then(() => {
+        renderBatchTimerRef.current = requestAnimationFrame(() => {
           cellRectMapRef.current = pendingRectMapRef.current;
           pendingRectMapRef.current = new Map();
           renderBatchTimerRef.current = null;
-          // Notify React so persistent edited-cell overlays reposition with the redraw
-          setMapVersion((v) => v + 1);
-          // The view changed (scroll/zoom/edit) — drop the stale cursor hover box
-          setHoverOverlay(null);
-        });
+          // Only re-render when there are overlays to reposition (no cost on plain sheets)
+          if (hasOverlaysRef.current) setMapVersion((v) => v + 1);
+          // Drop the stale cursor hover box — but only if one is actually shown (else no render)
+          setHoverOverlay((h) => (h ? null : h));
+        }) as unknown as ReturnType<typeof setTimeout>;
       }
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Memoize the heavy FortuneSheet element so per-frame overlay re-renders (mapVersion/hover)
+  // don't re-render the whole grid. Only rebuilds when its real inputs change.
+  const workbookEl = useMemo(() => (
+    <Workbook
+      key={workbookKey}
+      ref={workbookRef}
+      data={sheets}
+      lang="ru"
+      onChange={handleChange}
+      showToolbar={editor}
+      showFormulaBar
+      allowEdit={editor}
+      hooks={workbookHooks}
+      toolbarItems={[
+        'undo','redo','|',
+        'format-painter','clear-format','|',
+        'font','|',
+        'font-size','|',
+        'bold','italic','strike-through','underline','|',
+        'font-color','background','|',
+        'border','merge-cell','|',
+        'horizontal-align','vertical-align','text-wrap','text-rotation','|',
+        'currency-format','percentage-format','number-decrease','number-increase','format','|',
+        'freeze','filter','conditionFormat','|',
+        'quick-formula','|',
+        'comment','link','image','|',
+        'search','screenshot',
+      ]}
+    />
+  ), [workbookKey, sheets, handleChange, editor, workbookHooks]);
 
   if (sheetError) {
     return (
@@ -681,22 +726,32 @@ export default function SheetPage() {
             if (!origin) return null;
             const map = cellRectMapRef.current;
             const prefix = `${activeSheetIdx}_`;
-            const items: React.ReactNode[] = [];
+            const seen = overlaySeenRef.current;
+            const now = Date.now();
+            const FADE_KEEP = 400; // ms to keep an off-screen overlay mounted so it can fade out
+
+            // Refresh last-known positions for currently-visible edited cells
             for (const hKey in cellHighlights) {
               if (!hKey.startsWith(prefix)) continue;
-              const rc = hKey.slice(prefix.length);          // "r_c"
-              const rect = map.get(rc);
-              if (!rect) continue;                            // not currently visible
+              const rect = map.get(hKey.slice(prefix.length));
+              if (rect) seen.set(hKey, { left: origin.left + rect.x, top: origin.top + rect.y, w: rect.w, h: rect.h, t: now });
+            }
+
+            const items: React.ReactNode[] = [];
+            for (const [hKey, info] of seen) {
+              const onScreen = map.has(hKey.slice(prefix.length)) && hKey.startsWith(prefix);
+              if (!onScreen && now - info.t > FADE_KEEP) { seen.delete(hKey); continue; }
               const change = cellHighlights[hKey];
+              if (!change) { seen.delete(hKey); continue; }
               const color = userColors[change.username] ?? '#3B82F6';
-              const left = origin.left + rect.x;
-              const top = origin.top + rect.y;
               items.push(
                 <div key={hKey} style={{
-                  position: 'absolute', left, top, width: rect.w, height: rect.h,
+                  position: 'absolute', left: info.left, top: info.top, width: info.w, height: info.h,
                   background: color + '22', border: `1.5px solid ${color}`,
                   boxSizing: 'border-box', overflow: 'hidden',
                   pointerEvents: 'none', zIndex: 49,
+                  opacity: onScreen ? 1 : 0,
+                  transition: 'opacity 0.2s ease',
                 }}>
                   {/* Date/time — inside the cell, top-right */}
                   <span style={{
@@ -739,32 +794,7 @@ export default function SheetPage() {
             />
           )}
 
-          <Workbook
-            key={workbookKey}
-            ref={workbookRef}
-            data={sheets}
-            lang="ru"
-            onChange={handleChange}
-            showToolbar={editor}
-            showFormulaBar
-            allowEdit={editor}
-            hooks={workbookHooks}
-            toolbarItems={[
-              'undo','redo','|',
-              'format-painter','clear-format','|',
-              'font','|',
-              'font-size','|',
-              'bold','italic','strike-through','underline','|',
-              'font-color','background','|',
-              'border','merge-cell','|',
-              'horizontal-align','vertical-align','text-wrap','text-rotation','|',
-              'currency-format','percentage-format','number-decrease','number-increase','format','|',
-              'freeze','filter','conditionFormat','|',
-              'quick-formula','|',
-              'comment','link','image','|',
-              'search','screenshot',
-            ]}
-          />
+          {workbookEl}
         </div>
 
         {/* History sidebar — overlay on mobile, sidebar on desktop */}
