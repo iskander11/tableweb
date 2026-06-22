@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { io, Socket } from 'socket.io-client';
@@ -367,8 +367,6 @@ export default function SheetPage() {
     let foundKey: string | null = null;
     let foundRect: { x: number; y: number; w: number; h: number } | null = null;
 
-    console.log('[HOVER] cx:', cx.toFixed(1), 'cy:', cy.toFixed(1), 'mapSize:', map.size, 'ratio:', ratio);
-
     for (const [key, rect] of map) {
       const rx = rect.x / ratio, ry = rect.y / ratio;
       const rw = rect.w / ratio, rh = rect.h / ratio;
@@ -596,6 +594,24 @@ export default function SheetPage() {
       setImportState({ active: false, progress: 0, error: err.response?.data?.error || 'Ошибка импорта' });
     }
   };
+
+  // Stable hooks object — must NOT be recreated on re-renders or FortuneSheet
+  // re-registers hooks → triggers re-render → infinite loop → afterRenderCell fires endlessly
+  const workbookHooks = useMemo(() => ({
+    afterRenderCell: (_cell: any, cellInfo: any, _ctx: any) => {
+      pendingRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
+        x: cellInfo.startX, y: cellInfo.startY,
+        w: cellInfo.endX - cellInfo.startX,
+        h: cellInfo.endY - cellInfo.startY,
+      });
+      if (renderBatchTimerRef.current !== null) clearTimeout(renderBatchTimerRef.current);
+      renderBatchTimerRef.current = setTimeout(() => {
+        cellRectMapRef.current = pendingRectMapRef.current;
+        pendingRectMapRef.current = new Map();
+        renderBatchTimerRef.current = null;
+      }, 50);
+    },
+  }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (sheetError) {
     return (
@@ -826,25 +842,7 @@ export default function SheetPage() {
             showToolbar={editor}
             showFormulaBar
             allowEdit={editor}
-            hooks={{
-              afterRenderCell: (_cell, cellInfo, _ctx) => {
-                if (cellInfo.row === 0 && cellInfo.column === 0) {
-                  console.log('[HOOK] afterRenderCell(0,0) fired, startX:', cellInfo.startX, 'startY:', cellInfo.startY);
-                }
-                pendingRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
-                  x: cellInfo.startX, y: cellInfo.startY,
-                  w: cellInfo.endX - cellInfo.startX,
-                  h: cellInfo.endY - cellInfo.startY,
-                });
-                if (renderBatchTimerRef.current !== null) clearTimeout(renderBatchTimerRef.current);
-                renderBatchTimerRef.current = setTimeout(() => {
-                  console.log('[HOOK] map swapped, size:', pendingRectMapRef.current.size);
-                  cellRectMapRef.current = pendingRectMapRef.current;
-                  pendingRectMapRef.current = new Map();
-                  renderBatchTimerRef.current = null;
-                }, 50);
-              },
-            }}
+            hooks={workbookHooks}
             toolbarItems={[
               'undo','redo','|',
               'format-painter','clear-format','|',
