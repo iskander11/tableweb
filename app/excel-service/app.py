@@ -911,9 +911,12 @@ def parse_excel():
                 if is_master:
                     m = merges[f'{r}_{c}']
                     cd['mc'] = {'r': r, 'c': c, 'rs': m['rs'], 'cs': m['cs']}
-                if val is not None: cd['v'] = val
-                if display:         cd['m'] = display
-                if formula:         cd['f'] = formula
+                if formula:
+                    cd['f'] = formula
+                    # Don't set v/m: let FortuneSheet compute from formula fresh
+                else:
+                    if val is not None: cd['v'] = val
+                    if display:         cd['m'] = display
                 if cell_type == 'd':
                     fmt = (cell.number_format or '').split(';')[0]
                     cd['ct'] = {'fa': fmt, 't': 'd'}
