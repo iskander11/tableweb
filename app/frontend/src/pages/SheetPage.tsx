@@ -107,8 +107,12 @@ export default function SheetPage() {
     color: string; username: string | null;
   } | null>(null);
   const [activeSheetIdx, setActiveSheetIdx] = useState(0);
-  // When navigating from history — show a highlighted border on that cell for 2s
-  const [navHighlight, setNavHighlight] = useState<{ r: number; c: number; sheetIdx: number } | null>(null);
+  // Bumped whenever the cell-rect map is rebuilt (scroll/zoom/redraw) → re-renders persistent overlays
+  const [mapVersion, setMapVersion] = useState(0);
+  // When navigating from history — pulse this resolved absolute rect for 2.5s
+  const [navHighlight, setNavHighlight] = useState<{
+    left: number; top: number; width: number; height: number; color: string;
+  } | null>(null);
   const workbookWrapperRef = useRef<HTMLDivElement>(null);
   // Exact CSS-pixel rects of every VISIBLE cell, captured from FortuneSheet's afterRenderCell hook.
   // Coords are relative to the .fortune-sheet-canvas top-left (already CSS px — FortuneSheet's
@@ -283,12 +287,12 @@ export default function SheetPage() {
       if (cx >= rect.x && cx < rect.x + rect.w && cy >= rect.y && cy < rect.y + rect.h) {
         const [row, col] = key.split('_').map(Number);
         const hKey = `${activeSheetIdx}_${row}_${col}`;
-        const change = cellHighlights[hKey];
-        const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
+        // Edited cells are already decorated permanently → only neutral-gray hover on others
+        if (cellHighlights[hKey]) { setHoverOverlay(null); return; }
         setHoverOverlay({
           left: origin.left + rect.x, top: origin.top + rect.y,
           width: rect.w,             height: rect.h,
-          color, username: change?.username ?? null,
+          color: '#94a3b8', username: null,
         });
         return;
       }
@@ -307,18 +311,35 @@ export default function SheetPage() {
     setNavHighlight(null);
 
     const wb = workbookRef.current as any;
+    const opts = { index: sheetIndex };
+    // Switch to the target sheet if needed (no-op when already active)
+    try { wb?.activateSheet?.(opts); } catch (_) {}
     // Native selection — FortuneSheet draws its own highlight box exactly on the cell
-    try { wb?.setSelection?.([{ row: [r, r], column: [c, c] }]); } catch (_) {}
+    try { wb?.setSelection?.([{ row: [r, r], column: [c, c] }], opts); } catch (_) {}
     // Native scroll to bring it into view
     try { wb?.scroll?.({ targetRow: r, targetColumn: c }); } catch (_) {}
 
-    // After the redraw settles, read the cell's exact rect from the map for the pulse overlay.
-    // (Every visible cell — including empty ones — is in the map after the scroll re-render.)
-    setTimeout(() => {
-      setNavHighlight({ r, c, sheetIdx: sheetIndex });
-      setTimeout(() => setNavHighlight(null), 2500);
-    }, 250);
-  }, []);
+    // Poll the cell-rect map until the (now-scrolled-into-view) cell appears, then pulse it.
+    // Redraw timing varies, so retry a few times instead of a single fixed delay.
+    let tries = 0;
+    const tick = () => {
+      tries += 1;
+      const rect = cellRectMapRef.current.get(`${r}_${c}`);
+      const origin = getCanvasOrigin();
+      if (rect && origin) {
+        const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
+        const color = change ? (userColors[change.username] ?? '#3B82F6') : '#3B82F6';
+        setNavHighlight({
+          left: origin.left + rect.x, top: origin.top + rect.y,
+          width: rect.w, height: rect.h, color,
+        });
+        setTimeout(() => setNavHighlight(null), 2500);
+      } else if (tries < 15) {
+        setTimeout(tick, 80);
+      }
+    };
+    setTimeout(tick, 120);
+  }, [cellHighlights, userColors, getCanvasOrigin]);
 
   // Note: change detection (diff + summary) is computed server-side on save.
 
@@ -447,6 +468,8 @@ export default function SheetPage() {
         cellRectMapRef.current = pendingRectMapRef.current;
         pendingRectMapRef.current = new Map();
         renderBatchTimerRef.current = null;
+        // Notify React so persistent edited-cell overlays reposition after the redraw
+        setMapVersion((v) => v + 1);
       }, 50);
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -638,33 +661,71 @@ export default function SheetPage() {
             </div>
           )}
 
-          {/* Navigation highlight — shown 2.5s after clicking a history entry */}
-          {navHighlight && (() => {
-            // After the native scroll, the target cell is visible → its exact rect is in the map.
-            const mapEntry = cellRectMapRef.current.get(`${navHighlight.r}_${navHighlight.c}`);
+          {/* Persistent overlays on every edited & currently-visible cell.
+              Web-only decoration (absolutely-positioned divs) — never part of the sheet/export.
+              Re-rendered whenever the cell map changes (mapVersion). */}
+          {(() => {
+            void mapVersion; // dependency: recompute positions after each redraw
             const origin = getCanvasOrigin();
-            if (!mapEntry || !origin) return null;
-            const hKey = `${navHighlight.sheetIdx}_${navHighlight.r}_${navHighlight.c}`;
-            const change = cellHighlights[hKey];
-            const color = change ? (userColors[change.username] ?? '#3B82F6') : '#3B82F6';
-            return (
-              <div
-                style={{
-                  position: 'absolute',
-                  left:   origin.left + mapEntry.x,
-                  top:    origin.top + mapEntry.y,
-                  width:  mapEntry.w,
-                  height: mapEntry.h,
-                  background: color + '44',
-                  border: `2px solid ${color}`,
-                  pointerEvents: 'none',
-                  zIndex: 51,
-                  boxSizing: 'border-box',
-                  animation: 'twSheetPulse 0.6s ease-in-out 3',
-                }}
-              />
-            );
+            if (!origin) return null;
+            const map = cellRectMapRef.current;
+            const prefix = `${activeSheetIdx}_`;
+            const items: React.ReactNode[] = [];
+            for (const hKey in cellHighlights) {
+              if (!hKey.startsWith(prefix)) continue;
+              const rc = hKey.slice(prefix.length);          // "r_c"
+              const rect = map.get(rc);
+              if (!rect) continue;                            // not currently visible
+              const change = cellHighlights[hKey];
+              const color = userColors[change.username] ?? '#3B82F6';
+              const left = origin.left + rect.x;
+              const top = origin.top + rect.y;
+              items.push(
+                <div key={hKey} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none', zIndex: 49 }}>
+                  {/* Colored cell box + username bottom-left */}
+                  <div style={{
+                    position: 'absolute', left, top, width: rect.w, height: rect.h,
+                    background: color + '22', border: `1.5px solid ${color}`,
+                    boxSizing: 'border-box', display: 'flex', alignItems: 'flex-end',
+                    overflow: 'hidden',
+                  }}>
+                    <span style={{
+                      fontSize: 9, lineHeight: '10px', color, padding: '0 2px 1px',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      maxWidth: '100%', fontWeight: 600,
+                    }}>{change.username}</span>
+                  </div>
+                  {/* Date/time pill to the right of the cell */}
+                  <span style={{
+                    position: 'absolute', left: left + rect.w + 3, top: top + 1,
+                    fontSize: 9, lineHeight: '12px', color: '#475569',
+                    background: '#ffffffEE', border: '1px solid #e2e8f0', borderRadius: 4,
+                    padding: '0 4px', whiteSpace: 'nowrap', boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
+                  }}>{formatTime(change.saved_at)}</span>
+                </div>
+              );
+            }
+            return items;
           })()}
+
+          {/* Navigation highlight — shown 2.5s after clicking a history entry */}
+          {navHighlight && (
+            <div
+              style={{
+                position: 'absolute',
+                left:   navHighlight.left,
+                top:    navHighlight.top,
+                width:  navHighlight.width,
+                height: navHighlight.height,
+                background: navHighlight.color + '44',
+                border: `2px solid ${navHighlight.color}`,
+                pointerEvents: 'none',
+                zIndex: 52,
+                boxSizing: 'border-box',
+                animation: 'twSheetPulse 0.6s ease-in-out 3',
+              }}
+            />
+          )}
 
           <Workbook
             key={workbookKey}
