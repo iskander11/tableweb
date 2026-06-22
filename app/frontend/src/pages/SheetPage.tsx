@@ -129,6 +129,8 @@ export default function SheetPage() {
   const hasOverlaysRef = useRef(false);
   // Last-known rect per edited cell, for smooth fade-out when it scrolls out of view
   const overlaySeenRef = useRef<Map<string, { left: number; top: number; w: number; h: number; t: number }>>(new Map());
+  // Cell key the cursor is currently over → skip redundant hover state updates
+  const lastHoverKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const prefix = `${activeSheetIdx}_`;
     hasOverlaysRef.current = Object.keys(cellHighlights).some((k) => k.startsWith(prefix));
@@ -303,6 +305,9 @@ export default function SheetPage() {
     const map = cellRectMapRef.current;
     for (const [key, rect] of map) {
       if (cx >= rect.x && cx < rect.x + rect.w && cy >= rect.y && cy < rect.y + rect.h) {
+        // Optimization: cursor still inside the same cell → nothing to update
+        if (lastHoverKeyRef.current === key) return;
+        lastHoverKeyRef.current = key;
         const [row, col] = key.split('_').map(Number);
         const hKey = `${activeSheetIdx}_${row}_${col}`;
         // Edited cells are already decorated permanently → only neutral-gray hover on others
@@ -315,14 +320,15 @@ export default function SheetPage() {
         return;
       }
     }
-    setHoverOverlay(null);
-  }, [activeSheetIdx, cellHighlights, userColors, getCanvas, getCanvasOrigin]);
+    if (lastHoverKeyRef.current !== null) { lastHoverKeyRef.current = null; setHoverOverlay(null); }
+  }, [activeSheetIdx, cellHighlights, getCanvas, getCanvasOrigin]);
 
   const handleWorkbookMouseLeave = useCallback(() => {
+    lastHoverKeyRef.current = null;
     setHoverOverlay(null);
   }, []);
 
-  // Navigate to cell from history click — select + scroll natively, then pulse-highlight it.
+  // Navigate to cell from history click — center it on screen, then pulse-highlight it.
   const navigateToCell = useCallback((sheetIndex: number, r: number, c: number) => {
     setActiveSheetIdx(sheetIndex);
     setHoverOverlay(null);
@@ -330,23 +336,35 @@ export default function SheetPage() {
 
     const wb = workbookRef.current as any;
     // Native selection — FortuneSheet draws its own highlight box exactly on the cell.
-    // (No activateSheet — calling it resets scroll to the top-left, which threw nav off.)
     try { wb?.setSelection?.([{ row: [r, r], column: [c, c] }]); } catch (_) {}
+    // Step 1: bring the cell to the top-left (sets the scrollbars to its content position).
+    try { wb?.scroll?.({ targetRow: r, targetColumn: c }); } catch (_) {}
 
-    // Scroll to the cell. Re-assert across a couple of frames so a redraw can't undo it.
-    const doScroll = () => { try { wb?.scroll?.({ targetRow: r, targetColumn: c }); } catch (_) {} };
-    doScroll();
-    setTimeout(doScroll, 60);
-    setTimeout(doScroll, 160);
+    const wrap = workbookWrapperRef.current;
+    const sbx = wrap?.querySelector('.luckysheet-scrollbar-x') as HTMLElement | null;
+    const sby = wrap?.querySelector('.luckysheet-scrollbar-y') as HTMLElement | null;
 
-    // Poll the cell-rect map until the (now-scrolled-into-view) cell appears, then pulse it.
-    // Redraw timing varies, so retry a few times instead of a single fixed delay.
+    // Step 2: once the top-left scroll has rendered, shift by half the viewport to CENTER it.
+    const center = () => {
+      const rect = cellRectMapRef.current.get(`${r}_${c}`);
+      if (sbx && rect) {
+        const shift = Math.max(0, (sbx.clientWidth - rect.w) / 2);
+        sbx.scrollLeft = Math.max(0, sbx.scrollLeft - shift);
+      }
+      if (sby && rect) {
+        const shift = Math.max(0, (sby.clientHeight - rect.h) / 2);
+        sby.scrollTop = Math.max(0, sby.scrollTop - shift);
+      }
+    };
+    setTimeout(center, 90);
+
+    // Step 3: after the centered scroll renders, read the cell's exact rect and pulse it.
     let tries = 0;
     const tick = () => {
       tries += 1;
       const rect = cellRectMapRef.current.get(`${r}_${c}`);
       const origin = getCanvasOrigin();
-      if (rect && origin) {
+      if (rect && origin && tries >= 2) {
         const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
         const color = change ? (userColors[change.username] ?? '#3B82F6') : '#3B82F6';
         setNavHighlight({
@@ -354,11 +372,11 @@ export default function SheetPage() {
           width: rect.w, height: rect.h, color,
         });
         setTimeout(() => setNavHighlight(null), 2500);
-      } else if (tries < 20) {
-        setTimeout(tick, 80);
+      } else if (tries < 25) {
+        setTimeout(tick, 70);
       }
     };
-    setTimeout(tick, 160);
+    setTimeout(tick, 200);
   }, [cellHighlights, userColors, getCanvasOrigin]);
 
   // Note: change detection (diff + summary) is computed server-side on save.
@@ -431,36 +449,38 @@ export default function SheetPage() {
     const jobId = `job_${Date.now()}`;
     setImportState({ active: true, progress: 2, error: null });
 
+    // SSE is best-effort progress only. The POST below is the source of truth for completion,
+    // so a dropped/buffered SSE connection can never leave the bar stuck.
     const evtSource = new EventSource(
       `/api/excel/${id}/import-progress?jobId=${jobId}&token=${encodeURIComponent(token || '')}`
     );
-
     evtSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        setImportState((s) => ({ ...s, progress: data.progress }));
-        if (data.done) {
-          evtSource.close();
-          if (data.error) {
-            setImportState({ active: false, progress: 0, error: data.error });
-          } else {
-            api.get(`/spreadsheets/${id}`).then((r) => {
-              const fresh = buildSheets(r.data);
-              setSheets(fresh.length ? fresh : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }]);
-              setWorkbookKey((k) => k + 1);
-              setImportState({ active: false, progress: 0, error: null });
-              setIsDirty(false);
-            });
-          }
+        if (typeof data.progress === 'number') {
+          setImportState((s) => (s.active ? { ...s, progress: Math.max(s.progress, data.progress) } : s));
         }
+        if (data.done) evtSource.close();
       } catch { /* ignore parse errors */ }
     };
     evtSource.onerror = () => evtSource.close();
 
+    const finishImport = async () => {
+      const r = await api.get(`/spreadsheets/${id}`);
+      const fresh = buildSheets(r.data);
+      setSheets(fresh.length ? fresh : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }]);
+      setWorkbookKey((k) => k + 1);
+      setImportState({ active: false, progress: 0, error: null });
+      setIsDirty(false);
+    };
+
     try {
       const form = new FormData();
       form.append('file', file);
+      // Resolves when the server has fully imported — this, not SSE, drives completion.
       await api.post(`/excel/${id}/import?jobId=${jobId}`, form);
+      evtSource.close();
+      await finishImport();
     } catch (err: any) {
       evtSource.close();
       setImportState({ active: false, progress: 0, error: err.response?.data?.error || 'Ошибка импорта' });
@@ -492,7 +512,8 @@ export default function SheetPage() {
           renderBatchTimerRef.current = null;
           // Only re-render when there are overlays to reposition (no cost on plain sheets)
           if (hasOverlaysRef.current) setMapVersion((v) => v + 1);
-          // Drop the stale cursor hover box — but only if one is actually shown (else no render)
+          // View changed → drop the stale cursor hover box and force re-detect on next move
+          lastHoverKeyRef.current = null;
           setHoverOverlay((h) => (h ? null : h));
         }) as unknown as ReturnType<typeof setTimeout>;
       }

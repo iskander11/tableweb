@@ -9,3 +9,10 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.3; }
 }
+
+/* Excel-like thin "+" cursor over the grid cell area. FortuneSheet sets an inline
+   cursor:default on this element, so !important is needed to override it. Resize and
+   fill handles are separate child elements with their own cursor, so they still work. */
+.fortune-cell-area {
+  cursor: cell !important;
+}
