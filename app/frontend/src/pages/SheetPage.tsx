@@ -380,10 +380,6 @@ export default function SheetPage() {
     if (!foundKey || !foundRect) { setHoverOverlay(null); return; }
 
     const [row, col] = foundKey.split('_').map(Number);
-    console.log('[HOVER found] key:', foundKey, 'cx:', cx.toFixed(1), 'cy:', cy.toFixed(1),
-      'cell CSS rect:', (foundRect.x/ratio).toFixed(1), (foundRect.y/ratio).toFixed(1),
-      (foundRect.w/ratio).toFixed(1), (foundRect.h/ratio).toFixed(1),
-      'canvasTop:', canvasOriginRef.current.top, 'canvasLeft:', canvasOriginRef.current.left);
     const hKey = `${activeSheetIdx}_${row}_${col}`;
     const change = cellHighlights[hKey];
     const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
@@ -407,41 +403,22 @@ export default function SheetPage() {
   const navigateToCell = useCallback((sheetIndex: number, r: number, c: number) => {
     setActiveSheetIdx(sheetIndex);
     setHoverOverlay(null);
+    setNavHighlight(null);
 
-    const wrapper = workbookWrapperRef.current;
-    if (!wrapper) return;
-
-    // Ensure grid origin is measured before we scroll
-    if (gridOriginRef.current.top < 0) measureGridOrigin();
-
-    const curSheet = (latestSheetsRef.current ?? sheets)[sheetIndex];
-    const colLens = curSheet?.config?.columnlen ?? {};
-    const rowLens = curSheet?.config?.rowlen ?? {};
-    const DW = 73, DH = 19;
-    let scrollX = 0; for (let i = 0; i < c; i++) scrollX += (colLens[i] ?? DW);
-    let scrollY = 0; for (let i = 0; i < r; i++) scrollY += (rowLens[i] ?? DH);
-
-    // Scroll scrollable containers and update sheetScrollRef immediately (don't wait for event)
-    const all = Array.from(wrapper.querySelectorAll('*')) as HTMLElement[];
-    for (const el of all) {
-      if (el.scrollHeight > el.clientHeight + 2) {
-        const st = Math.max(0, scrollY - 80);
-        el.scrollTop = st;
-        sheetScrollRef.current = { ...sheetScrollRef.current, top: st };
-      }
-      if (el.scrollWidth > el.clientWidth + 2) {
-        const sl = Math.max(0, scrollX - 80);
-        el.scrollLeft = sl;
-        sheetScrollRef.current = { ...sheetScrollRef.current, left: sl };
-      }
+    // Use FortuneSheet's own scroll API to navigate to the target cell
+    const wb = workbookRef.current as any;
+    if (wb?.scroll) {
+      try { wb.scroll({ targetRow: r, targetColumn: c }); } catch (_) {}
     }
 
-    // Show highlight after a tick so React re-renders with updated scroll ref
+    // Wait for FortuneSheet to re-render (afterRenderCell fires) and the debounced
+    // map swap to complete (50ms after last afterRenderCell), then show highlight.
+    // 200ms gives enough margin: ~50ms render + 50ms debounce + 100ms safety.
     setTimeout(() => {
       setNavHighlight({ r, c, sheetIdx: sheetIndex });
       setTimeout(() => setNavHighlight(null), 2500);
-    }, 30);
-  }, [sheets, measureGridOrigin]);
+    }, 200);
+  }, []);
 
   const computeChangedCells = useCallback((current: any[], prev: any[] | null): CellChange[] => {
     if (!prev) return [];
