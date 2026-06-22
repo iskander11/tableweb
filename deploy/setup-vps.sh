@@ -110,5 +110,5 @@ nginx -t && systemctl reload nginx
 
 echo ""
 echo "=== SETUP COMPLETE ==="
-echo "Open http://168.222.202.6 in browser"
+echo "Open http://<YOUR_SERVER_IP> in browser"
 echo "Login: admin / admin123 (CHANGE AFTER FIRST LOGIN)"

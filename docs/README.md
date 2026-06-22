@@ -29,7 +29,7 @@
 ## Как пользоваться — инструкция
 
 ### Вход в систему
-1. Откройте браузер → введите адрес сервера (например `http://168.222.202.6`)
+1. Откройте браузер → введите адрес сервера (например `http://<YOUR_SERVER_IP>`)
 2. Введите логин и пароль → нажмите **Войти**
 
 ### Создание таблицы (редактор или администратор)
@@ -253,13 +253,13 @@ tableweb/
 
 ```bash
 # Подключиться к серверу
-ssh -i vps/id_rsa root@168.222.202.6
+ssh -i vps/id_rsa root@<YOUR_SERVER_IP>
 
 # Запустить скрипт установки
 bash /root/setup-vps.sh
 ```
 
-После установки: **http://168.222.202.6**  
+После установки: **http://<YOUR_SERVER_IP>**  
 Первый вход: `admin` / `admin123` — **сразу сменить пароль!**
 
 ---
@@ -271,12 +271,12 @@ bash /root/setup-vps.sh
 git push origin main
 
 # Потом применить на сервере
-ssh -i vps/id_rsa root@168.222.202.6 "bash /var/www/tableweb/deploy/update.sh"
+ssh -i vps/id_rsa root@<YOUR_SERVER_IP> "bash /var/www/tableweb/deploy/update.sh"
 ```
 
 При обновлении: если добавились новые таблицы в БД — нужно выполнить дополнительно:
 ```bash
-ssh -i vps/id_rsa root@168.222.202.6 "sudo -u postgres psql -d tableweb -f /var/www/tableweb/app/backend/src/db/schema.sql"
+ssh -i vps/id_rsa root@<YOUR_SERVER_IP> "sudo -u postgres psql -d tableweb -f /var/www/tableweb/app/backend/src/db/schema.sql"
 ```
 
 ---

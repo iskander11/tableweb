@@ -153,6 +153,22 @@ export default function SheetPage() {
     return () => wrapper.removeEventListener('scroll', onScroll, true);
   }, [workbookKey]); // re-attach when workbook remounts
 
+  // Reset grid origin measurement when browser zoom changes (devicePixelRatio changes)
+  useEffect(() => {
+    let lastDpr = window.devicePixelRatio;
+    const check = () => {
+      if (window.devicePixelRatio !== lastDpr) {
+        lastDpr = window.devicePixelRatio;
+        gridOriginRef.current = { top: -1, left: -1 };
+        setHoverOverlay(null);
+      }
+    };
+    // matchMedia trick: fires when the current dpr-specific query stops matching
+    const mq = window.matchMedia(`(resolution: ${lastDpr}dppx)`);
+    mq.addEventListener('change', check);
+    return () => mq.removeEventListener('change', check);
+  }, []);
+
   useEffect(() => {
     if (fontsVersion > 0) {
       acceptChangesRef.current = false;
@@ -274,6 +290,7 @@ export default function SheetPage() {
 
   // Compute cell rect (relative to workbookWrapper) for a given sheet/row/col
   const getCellRect = useCallback((sheetIdx: number, row: number, col: number) => {
+    if (gridOriginRef.current.top < 0) measureGridOrigin();
     if (gridOriginRef.current.top < 0) return null;
     const curSheet = (latestSheetsRef.current ?? sheets)[sheetIdx];
     const colLens = curSheet?.config?.columnlen ?? {};
@@ -289,7 +306,7 @@ export default function SheetPage() {
       width:  colLens[col] ?? DW,
       height: rowLens[row] ?? DH,
     };
-  }, [sheets, ROW_HEADER_W, COL_HEADER_H]);
+  }, [sheets, ROW_HEADER_W, COL_HEADER_H, measureGridOrigin]);
 
   const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const wrapper = workbookWrapperRef.current;
@@ -661,6 +678,7 @@ export default function SheetPage() {
         <div
           className="flex-1 overflow-hidden relative"
           ref={workbookWrapperRef}
+          onMouseEnter={() => { gridOriginRef.current = { top: -1, left: -1 }; }}
           onMouseMove={handleWorkbookMouseMove}
           onMouseLeave={handleWorkbookMouseLeave}
         >
