@@ -785,8 +785,11 @@ export default function SheetPage() {
 
           {/* Navigation highlight — shown 2.5s after clicking a history entry */}
           {navHighlight && (() => {
-            const rect = getCellRect(navHighlight.sheetIdx, navHighlight.r, navHighlight.c);
-            if (!rect) return null;
+            const mapRect = cellRectMapRef.current.get(`${navHighlight.r}_${navHighlight.c}`);
+            if (!mapRect) return null;
+            const ratio = canvasPxRatioRef.current;
+            const cL = canvasOriginRef.current.left;
+            const cT = canvasOriginRef.current.top;
             const hKey = `${navHighlight.sheetIdx}_${navHighlight.r}_${navHighlight.c}`;
             const change = cellHighlights[hKey];
             const color = change ? (userColors[change.username] ?? '#3B82F6') : '#3B82F6';
@@ -794,10 +797,10 @@ export default function SheetPage() {
               <div
                 style={{
                   position: 'absolute',
-                  left: rect.left,
-                  top: rect.top,
-                  width: rect.width,
-                  height: rect.height,
+                  left: cL + mapRect.x / ratio,
+                  top:  cT + mapRect.y / ratio,
+                  width:  mapRect.w / ratio,
+                  height: mapRect.h / ratio,
                   background: color + '44',
                   border: `2px solid ${color}`,
                   pointerEvents: 'none',
