@@ -117,6 +117,9 @@ export default function SheetPage() {
   const gridOriginRef = useRef({ top: -1, left: -1 });
   // Cell rect cache filled by FortuneSheet's afterRenderCell hook (in canvas-pixel coords)
   const cellRectMapRef = useRef<Map<string, { x: number; y: number; w: number; h: number }>>(new Map());
+  // Pending map collects cells during a render pass; swapped into cellRectMapRef after render batch
+  const pendingRectMapRef = useRef<Map<string, { x: number; y: number; w: number; h: number }>>(new Map());
+  const renderBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // canvas.width / canvas.offsetWidth — converts canvas device-px to CSS-px
   const canvasPxRatioRef = useRef(1);
   const sheetMetaRef = useRef<any>(null);
@@ -822,16 +825,20 @@ export default function SheetPage() {
             showFormulaBar
             allowEdit={editor}
             hooks={{
-              beforeRenderCellArea: (_cells, _ctx) => {
-                cellRectMapRef.current.clear();
-                return true;
-              },
               afterRenderCell: (_cell, cellInfo, _ctx) => {
-                cellRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
+                pendingRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
                   x: cellInfo.startX, y: cellInfo.startY,
                   w: cellInfo.endX - cellInfo.startX,
                   h: cellInfo.endY - cellInfo.startY,
                 });
+                // After all cells in this render pass have fired, swap pending → active.
+                // 50ms comfortably exceeds one frame, so the swap happens once per redraw.
+                if (renderBatchTimerRef.current !== null) clearTimeout(renderBatchTimerRef.current);
+                renderBatchTimerRef.current = setTimeout(() => {
+                  cellRectMapRef.current = pendingRectMapRef.current;
+                  pendingRectMapRef.current = new Map();
+                  renderBatchTimerRef.current = null;
+                }, 50);
               },
             }}
             toolbarItems={[
