@@ -77,6 +77,11 @@ io.on('connection', (socket) => {
     socket.to(sheetId).emit('cell-change', { userId: socket.user.id, changes });
   });
 
+  // Broadcast color change to all connected clients
+  socket.on('update-color', ({ color }) => {
+    io.emit('user-color-changed', { username: socket.user.username, color });
+  });
+
   socket.on('save-sheet', async ({ sheetId, sheetIndex, data, summary, changedCells }) => {
     try {
       await query(

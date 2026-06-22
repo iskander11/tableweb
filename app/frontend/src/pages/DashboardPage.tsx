@@ -1,9 +1,15 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Pencil, Trash2, Lock, Archive, ChevronLeft, ChevronRight, KeyRound, X, CheckCircle } from 'lucide-react';
 import api from '../api/client';
 import { useAuth } from '../store/auth';
+import { useSocketColorSync, emitColorChange } from '../hooks/useSocketColorSync';
+
+const PRESET_COLORS = [
+  '#EF4444','#F97316','#EAB308','#22C55E','#14B8A6',
+  '#3B82F6','#8B5CF6','#EC4899','#06B6D4','#84CC16',
+];
 
 function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const [form, setForm] = useState({ current: '', next: '', confirm: '' });
@@ -106,6 +112,31 @@ export default function DashboardPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const colorPickerRef = useRef<HTMLDivElement>(null);
+
+  // Load own color
+  const { data: userColors = [] } = useQuery<{ username: string; color: string }[]>({
+    queryKey: ['user-colors'],
+    queryFn: () => api.get('/auth/user-colors').then((r) => r.data),
+  });
+  const myColor = userColors.find((u) => u.username === user?.username)?.color ?? '#3B82F6';
+
+  const changeColorMutation = useMutation({
+    mutationFn: (color: string) => api.patch('/auth/me/color', { color }),
+    onSuccess: (_data, color) => {
+      qc.invalidateQueries({ queryKey: ['user-colors'] });
+      emitColorChange(color);  // broadcast to all open SheetPage tabs
+    },
+  });
+
+  // Sync color changes from other users via socket
+  useSocketColorSync((username, color) => {
+    qc.setQueryData(['user-colors'], (old: any) => {
+      if (!old) return old;
+      return old.map((u: any) => u.username === username ? { ...u, color } : u);
+    });
+  });
 
   const { data: sheets = [] } = useQuery<Spreadsheet[]>({
     queryKey: ['sheets'],
@@ -162,6 +193,37 @@ export default function DashboardPage() {
       <header className="bg-white border-b px-4 sm:px-6 py-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">TableWeb</h1>
         <div className="flex items-center gap-3 sm:gap-4">
+          {/* Color picker */}
+          <div className="relative" ref={colorPickerRef}>
+            <button
+              onClick={() => setShowColorPicker((v) => !v)}
+              className="w-6 h-6 rounded-full border-2 border-white shadow ring-2 ring-gray-200 hover:ring-gray-400 transition shrink-0"
+              style={{ background: myColor }}
+              title="Мой цвет"
+            />
+            {showColorPicker && (
+              <div className="absolute right-0 top-8 z-50 bg-white rounded-xl shadow-xl border p-3 w-48">
+                <p className="text-xs text-gray-500 mb-2">Выберите ваш цвет</p>
+                <div className="grid grid-cols-5 gap-2">
+                  {PRESET_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => {
+                        changeColorMutation.mutate(c);
+                        setShowColorPicker(false);
+                      }}
+                      className="w-7 h-7 rounded-full border-2 transition hover:scale-110"
+                      style={{
+                        background: c,
+                        borderColor: myColor === c ? '#1e293b' : 'transparent',
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           <button
             onClick={() => setShowChangePassword(true)}
             className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-800 hidden sm:flex"

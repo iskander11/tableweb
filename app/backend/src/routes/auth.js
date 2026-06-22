@@ -4,6 +4,12 @@ import jwt from 'jsonwebtoken';
 import { query } from '../db/index.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
 
+const PRESET_COLORS = [
+  '#EF4444','#F97316','#EAB308','#22C55E','#14B8A6',
+  '#3B82F6','#8B5CF6','#EC4899','#06B6D4','#84CC16',
+];
+function randomColor() { return PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)]; }
+
 const router = Router();
 
 // Login
@@ -63,8 +69,8 @@ router.post('/users', authenticate, requireAdmin, async (req, res) => {
     }
     const hash = await bcrypt.hash(password, 12);
     const { rows } = await query(
-      'INSERT INTO users (username, email, password_hash, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, username, role',
-      [trimmed, `${trimmed}@tableweb.local`, hash, role || 'reader', req.user.id]
+      'INSERT INTO users (username, email, password_hash, role, created_by, color) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, username, role, color',
+      [trimmed, `${trimmed}@tableweb.local`, hash, role || 'reader', req.user.id, randomColor()]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -78,9 +84,27 @@ router.post('/users', authenticate, requireAdmin, async (req, res) => {
 // Get all users (admin only)
 router.get('/users', authenticate, requireAdmin, async (req, res) => {
   const { rows } = await query(
-    'SELECT id, username, email, role, created_at, is_active FROM users ORDER BY created_at'
+    'SELECT id, username, email, role, created_at, is_active, color FROM users ORDER BY created_at'
   );
   res.json(rows);
+});
+
+// Get username→color map for all active users (accessible to all authenticated users)
+router.get('/user-colors', authenticate, async (req, res) => {
+  const { rows } = await query(
+    'SELECT username, color FROM users WHERE is_active = TRUE'
+  );
+  res.json(rows);
+});
+
+// Change own color
+router.patch('/me/color', authenticate, async (req, res) => {
+  const { color } = req.body;
+  if (!color || !/^#[0-9A-Fa-f]{6}$/.test(color)) {
+    return res.status(400).json({ error: 'Неверный формат цвета' });
+  }
+  await query('UPDATE users SET color = $1 WHERE id = $2', [color, req.user.id]);
+  res.json({ success: true, color });
 });
 
 // Update user role (admin only)

@@ -112,6 +112,11 @@ export default function SheetPage() {
   const [showHistory, setShowHistory] = useState(false);
   const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
   const [cellHighlights, setCellHighlights] = useState<CellHighlightMap>({});
+  const [userColors, setUserColors] = useState<Record<string, string>>({});
+  const [hoveredCell, setHoveredCell] = useState<{ r: number; c: number } | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [activeSheetIdx, setActiveSheetIdx] = useState(0);
+  const workbookWrapperRef = useRef<HTMLDivElement>(null);
   const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
@@ -122,6 +127,15 @@ export default function SheetPage() {
   const { version: fontsVersion } = useFonts();
 
   const editor = isEditor();
+
+  // Load user colors on mount
+  useEffect(() => {
+    api.get('/auth/user-colors').then((r) => {
+      const map: Record<string, string> = {};
+      for (const u of r.data) map[u.username] = u.color;
+      setUserColors(map);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (fontsVersion > 0) {
@@ -192,6 +206,10 @@ export default function SheetPage() {
     socket.on('cell-change', ({ changes }) => {
       workbookRef.current?.applyOp?.(changes);
     });
+    socket.on('user-color-changed', ({ username, color }: { username: string; color: string }) => {
+      setUserColors((prev) => ({ ...prev, [username]: color }));
+    });
+
     socket.on('changelog-update', (entry: ChangeEntry) => {
       setChangelog((prev) => [entry, ...prev].slice(0, 100));
       // Update cell highlights for cells changed by others
@@ -211,6 +229,84 @@ export default function SheetPage() {
     });
     return () => { socket.disconnect(); };
   }, [id, token]);
+
+  // Calculate which cell is under the cursor inside the FortuneSheet workbook
+  const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const wrapper = workbookWrapperRef.current;
+    if (!wrapper) return;
+    const rect = wrapper.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // FortuneSheet approximate header offsets (row number column + col header row)
+    const ROW_HEADER_W = 46;
+    const COL_HEADER_H = 20;
+    // Try to read scroll from the FortuneSheet scroll containers
+    const scrollYEl = wrapper.querySelector('[class*="scrollbar-y"], [id*="scrollbar-y"], [class*="scroll-y"]') as HTMLElement | null;
+    const scrollXEl = wrapper.querySelector('[class*="scrollbar-x"], [id*="scrollbar-x"], [class*="scroll-x"]') as HTMLElement | null;
+    const scrollTop = scrollYEl?.scrollTop ?? 0;
+    const scrollLeft = scrollXEl?.scrollLeft ?? 0;
+
+    const adjX = x - ROW_HEADER_W + scrollLeft;
+    const adjY = y - COL_HEADER_H + scrollTop;
+
+    if (adjX < 0 || adjY < 0) { setHoveredCell(null); return; }
+
+    const curSheet = (latestSheetsRef.current ?? sheets)[activeSheetIdx];
+    const colLens = curSheet?.config?.columnlen ?? {};
+    const rowLens = curSheet?.config?.rowlen ?? {};
+    const DEFAULT_W = 73, DEFAULT_H = 19;
+
+    let col = 0, xAcc = 0;
+    for (; col < 500; col++) {
+      const w = colLens[col] ?? DEFAULT_W;
+      if (xAcc + w > adjX) break;
+      xAcc += w;
+    }
+    let row = 0, yAcc = 0;
+    for (; row < 2000; row++) {
+      const h = rowLens[row] ?? DEFAULT_H;
+      if (yAcc + h > adjY) break;
+      yAcc += h;
+    }
+
+    setHoveredCell({ r: row, c: col });
+    setTooltipPos({ x: e.clientX, y: e.clientY });
+  }, [sheets, activeSheetIdx]);
+
+  const handleWorkbookMouseLeave = useCallback(() => {
+    setHoveredCell(null);
+    setTooltipPos(null);
+  }, []);
+
+  // Navigate to cell from history click
+  const navigateToCell = useCallback((sheetIndex: number, r: number, c: number) => {
+    setActiveSheetIdx(sheetIndex);
+    // Attempt to scroll to the cell via FortuneSheet applyOp (selection)
+    try {
+      workbookRef.current?.applyOp?.([{
+        op: 'replace',
+        path: ['luckysheet_select_save'],
+        value: [{ row: [r, r], column: [c, c] }],
+      }]);
+    } catch { /* ignore */ }
+    // Also try DOM scroll: find the FortuneSheet main scroll area
+    const wrapper = workbookWrapperRef.current;
+    if (wrapper) {
+      const curSheet = (latestSheetsRef.current ?? sheets)[sheetIndex];
+      const colLens = curSheet?.config?.columnlen ?? {};
+      const rowLens = curSheet?.config?.rowlen ?? {};
+      const DEFAULT_W = 73, DEFAULT_H = 19;
+      let scrollX = 0;
+      for (let i = 0; i < c; i++) scrollX += colLens[i] ?? DEFAULT_W;
+      let scrollY = 0;
+      for (let i = 0; i < r; i++) scrollY += rowLens[i] ?? DEFAULT_H;
+      const scrollYEl = wrapper.querySelector('[class*="scrollbar-y"], [id*="scrollbar-y"]') as HTMLElement | null;
+      const scrollXEl = wrapper.querySelector('[class*="scrollbar-x"], [id*="scrollbar-x"]') as HTMLElement | null;
+      if (scrollYEl) scrollYEl.scrollTop = Math.max(0, scrollY - 100);
+      if (scrollXEl) scrollXEl.scrollLeft = Math.max(0, scrollX - 100);
+    }
+  }, [sheets]);
 
   const computeChangedCells = useCallback((current: any[], prev: any[] | null): CellChange[] => {
     if (!prev) return [];
@@ -518,9 +614,42 @@ export default function SheetPage() {
         </div>
       )}
 
+      {/* Cell hover tooltip */}
+      {hoveredCell && tooltipPos && (() => {
+        const key = `${activeSheetIdx}_${hoveredCell.r}_${hoveredCell.c}`;
+        const change = cellHighlights[key];
+        const color = change ? (userColors[change.username] ?? '#94a3b8') : '#94a3b8';
+        const label = change ? change.username : null;
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              left: tooltipPos.x + 14,
+              top: tooltipPos.y - 32,
+              background: color + '33',
+              border: `1.5px solid ${color}`,
+              borderRadius: 6,
+              padding: '2px 8px',
+              fontSize: 11,
+              color: '#1e293b',
+              pointerEvents: 'none',
+              zIndex: 9999,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {label ? `✏️ ${label}` : <span style={{ color: '#94a3b8' }}>Не изменялась</span>}
+          </div>
+        );
+      })()}
+
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 overflow-hidden">
+        <div
+          className="flex-1 overflow-hidden relative"
+          ref={workbookWrapperRef}
+          onMouseMove={handleWorkbookMouseMove}
+          onMouseLeave={handleWorkbookMouseLeave}
+        >
           <Workbook
             key={workbookKey}
             ref={workbookRef}
@@ -570,36 +699,52 @@ export default function SheetPage() {
                   <p className="text-xs text-gray-400 text-center py-8 px-3">Изменений пока нет</p>
                 ) : (
                   <ul className="divide-y">
-                    {changelog.map((e, i) => (
-                      <li key={i} className="px-3 py-3">
-                        <div className="flex items-center gap-1.5 mb-0.5">
-                          <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs font-bold shrink-0">
-                            {e.username[0].toUpperCase()}
-                          </span>
-                          <span className="text-sm font-medium text-gray-800 truncate">{e.username}</span>
-                        </div>
-                        {e.summary && (
-                          <p className="text-xs text-gray-600 mt-1 ml-7 break-words">{e.summary}</p>
-                        )}
-                        {e.changed_cells && e.changed_cells.length > 0 && (
-                          <div className="ml-7 mt-1.5 space-y-0.5">
-                            {e.changed_cells.slice(0, 8).map((cc, ci) => (
-                              <div key={ci} className="flex items-start gap-1 text-xs">
-                                <span className="font-mono font-semibold text-blue-600 shrink-0">{cc.col}</span>
-                                <span className="text-gray-400 shrink-0">→</span>
-                                <span className="text-gray-700 break-all">
-                                  {cc.newVal ? `"${cc.newVal.slice(0, 40)}"` : <span className="italic text-gray-400">удалено</span>}
-                                </span>
-                              </div>
-                            ))}
-                            {e.changed_cells.length > 8 && (
-                              <p className="text-xs text-gray-400">ещё {e.changed_cells.length - 8} ячеек…</p>
-                            )}
+                    {changelog.map((e, i) => {
+                      const uColor = userColors[e.username] ?? '#3B82F6';
+                      return (
+                        <li key={i} className="px-3 py-3">
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span
+                              className="inline-flex items-center justify-center w-6 h-6 rounded-full text-white text-xs font-bold shrink-0"
+                              style={{ background: uColor }}
+                            >
+                              {e.username[0].toUpperCase()}
+                            </span>
+                            <span className="text-sm font-medium text-gray-800 truncate">{e.username}</span>
                           </div>
-                        )}
-                        <p className="text-xs text-gray-400 mt-0.5 ml-7">{formatTime(e.saved_at)}</p>
-                      </li>
-                    ))}
+                          {e.summary && (
+                            <p className="text-xs text-gray-600 mt-1 ml-7 break-words">{e.summary}</p>
+                          )}
+                          {e.changed_cells && e.changed_cells.length > 0 && (
+                            <div className="ml-7 mt-1.5 space-y-0.5">
+                              {e.changed_cells.slice(0, 8).map((cc, ci) => {
+                                const [r, c] = cc.key.split('_').map(Number);
+                                return (
+                                  <button
+                                    key={ci}
+                                    className="flex items-start gap-1 text-xs w-full text-left hover:bg-gray-50 rounded px-1 -mx-1 py-0.5 transition group"
+                                    onClick={() => {
+                                      navigateToCell(e.sheet_index, r, c);
+                                    }}
+                                    title={`Перейти к ячейке ${cc.col}`}
+                                  >
+                                    <span className="font-mono font-semibold shrink-0 group-hover:underline" style={{ color: uColor }}>{cc.col}</span>
+                                    <span className="text-gray-400 shrink-0">→</span>
+                                    <span className="text-gray-700 break-all">
+                                      {cc.newVal ? `"${cc.newVal.slice(0, 40)}"` : <span className="italic text-gray-400">удалено</span>}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                              {e.changed_cells.length > 8 && (
+                                <p className="text-xs text-gray-400">ещё {e.changed_cells.length - 8} ячеек…</p>
+                              )}
+                            </div>
+                          )}
+                          <p className="text-xs text-gray-400 mt-0.5 ml-7">{formatTime(e.saved_at)}</p>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>
