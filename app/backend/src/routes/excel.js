@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { importExcel, exportExcel } from '../services/excel.js';
-import { query } from '../db/index.js';
+import pool, { query } from '../db/index.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = Router();
@@ -60,15 +60,27 @@ router.post('/:id/import', authenticate, upload.single('file'), async (req, res)
     const sheets = await importExcel(req.file.buffer, updateProgress);
     updateProgress(90);
 
-    await query('DELETE FROM spreadsheet_data WHERE spreadsheet_id = $1', [req.params.id]);
-
-    for (let i = 0; i < sheets.length; i++) {
-      await query(
-        'INSERT INTO spreadsheet_data (spreadsheet_id, sheet_index, data) VALUES ($1, $2, $3)',
-        [req.params.id, i, JSON.stringify(sheets[i])]
-      );
+    // Atomic swap: DELETE + INSERTs in one transaction so a mid-import failure
+    // can never leave the table partially wiped — either the new data fully lands
+    // or the old data stays untouched (ROLLBACK).
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM spreadsheet_data WHERE spreadsheet_id = $1', [req.params.id]);
+      for (let i = 0; i < sheets.length; i++) {
+        await client.query(
+          'INSERT INTO spreadsheet_data (spreadsheet_id, sheet_index, data) VALUES ($1, $2, $3)',
+          [req.params.id, i, JSON.stringify(sheets[i])]
+        );
+      }
+      await client.query('UPDATE spreadsheets SET updated_at = NOW() WHERE id = $1', [req.params.id]);
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
     }
-    await query('UPDATE spreadsheets SET updated_at = NOW() WHERE id = $1', [req.params.id]);
 
     updateProgress(100);
     if (jobId) {
