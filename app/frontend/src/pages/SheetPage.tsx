@@ -810,12 +810,11 @@ export default function SheetPage() {
             showFormulaBar
             allowEdit={editor}
             hooks={{
-              cellRenderAfter: (_cell: any, pos: any) => {
-                if (!pos || typeof pos.r !== 'number') return;
-                cellRectMapRef.current.set(`${pos.r}_${pos.c}`, {
-                  x: pos.startX, y: pos.startY,
-                  w: pos.endX - pos.startX,
-                  h: pos.endY - pos.startY,
+              afterRenderCell: (_cell, cellInfo, _ctx) => {
+                cellRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
+                  x: cellInfo.startX, y: cellInfo.startY,
+                  w: cellInfo.endX - cellInfo.startX,
+                  h: cellInfo.endY - cellInfo.startY,
                 });
               },
             }}
