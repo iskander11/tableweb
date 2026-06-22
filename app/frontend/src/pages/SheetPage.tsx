@@ -265,30 +265,52 @@ export default function SheetPage() {
   const ROW_HEADER_W = 46;
   const COL_HEADER_H = 20;
 
-  // Find the topmost canvas in the workbook — FortuneSheet renders the full grid (including
-  // column/row headers) on a single canvas that starts just below the toolbar+formula bar.
-  // Cells themselves begin ROW_HEADER_W px to the right and COL_HEADER_H px below the canvas.
+  // gridOriginRef stores the position of the FIRST DATA CELL (row=0, col=0) relative to wrapper.
+  // measureGridOrigin sets it by finding canvas positions and applying header offsets smartly.
   const measureGridOrigin = useCallback(() => {
     const wrapper = workbookWrapperRef.current;
     if (!wrapper) return;
     const wRect = wrapper.getBoundingClientRect();
-    const canvases = Array.from(wrapper.querySelectorAll('canvas'));
-    if (canvases.length > 0) {
-      const topCanvas = canvases.reduce((best, c) =>
-        c.getBoundingClientRect().top < best.getBoundingClientRect().top ? c : best
-      );
-      const cRect = topCanvas.getBoundingClientRect();
-      gridOriginRef.current = {
-        top:  cRect.top  - wRect.top,
-        left: cRect.left - wRect.left,
-      };
-    } else {
-      // No canvas yet — use structural estimates (toolbar≈40px, formula bar≈28px)
-      gridOriginRef.current = { top: editor ? 68 : 28, left: 0 };
-    }
-  }, [editor]);
+    const canvases = Array.from(wrapper.querySelectorAll('canvas')).map(c => {
+      const r = c.getBoundingClientRect();
+      return { top: r.top - wRect.top, left: r.left - wRect.left, w: c.offsetWidth, h: c.offsetHeight };
+    }).sort((a, b) => a.top - b.top || a.left - b.left);
 
-  // Compute cell rect (relative to workbookWrapper) for a given sheet/row/col
+    if (canvases.length === 0) {
+      // No canvas yet — estimate (toolbar≈40px + formula bar≈28px + col header 20px)
+      gridOriginRef.current = {
+        top:  (editor ? 88 : 48),
+        left: ROW_HEADER_W,
+      };
+      return;
+    }
+
+    if (canvases.length === 1) {
+      // Single canvas renders headers + cells; first cell starts at (ROW_HEADER_W, COL_HEADER_H) inside it
+      gridOriginRef.current = {
+        top:  canvases[0].top  + COL_HEADER_H,
+        left: canvases[0].left + ROW_HEADER_W,
+      };
+      return;
+    }
+
+    // Multiple canvases: one is the main cell grid (not at top=0 and not at left=0)
+    const cellCanvas = canvases.find(c => c.top > 10 && c.left > 10);
+    if (cellCanvas) {
+      // This canvas starts exactly at the first data cell
+      gridOriginRef.current = { top: cellCanvas.top, left: cellCanvas.left };
+      return;
+    }
+
+    // Fallback: topmost canvas + header offsets
+    gridOriginRef.current = {
+      top:  canvases[0].top  + COL_HEADER_H,
+      left: canvases[0].left + ROW_HEADER_W,
+    };
+  }, [editor, ROW_HEADER_W, COL_HEADER_H]);
+
+  // Compute cell rect (relative to workbookWrapper) for a given sheet/row/col.
+  // gridOriginRef already points to first data cell — no additional header offset needed.
   const getCellRect = useCallback((sheetIdx: number, row: number, col: number) => {
     if (gridOriginRef.current.top < 0) measureGridOrigin();
     if (gridOriginRef.current.top < 0) return null;
@@ -301,12 +323,12 @@ export default function SheetPage() {
     const { top: oT, left: oL } = gridOriginRef.current;
     const { top: st, left: sl } = sheetScrollRef.current;
     return {
-      left:   oL + ROW_HEADER_W - sl + xAcc,
-      top:    oT + COL_HEADER_H - st + yAcc,
+      left:   oL - sl + xAcc,
+      top:    oT - st + yAcc,
       width:  colLens[col] ?? DW,
       height: rowLens[row] ?? DH,
     };
-  }, [sheets, ROW_HEADER_W, COL_HEADER_H, measureGridOrigin]);
+  }, [sheets, measureGridOrigin]);
 
   const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const wrapper = workbookWrapperRef.current;
@@ -320,9 +342,9 @@ export default function SheetPage() {
     const { top: oT, left: oL } = gridOriginRef.current;
     const { top: st, left: sl } = sheetScrollRef.current;
 
-    // Offset inside the cell grid (excluding row/column headers)
-    const adjX = x - oL - ROW_HEADER_W + sl;
-    const adjY = y - oT - COL_HEADER_H + st;
+    // Offset inside the cell grid — gridOriginRef is already at first data cell
+    const adjX = x - oL + sl;
+    const adjY = y - oT + st;
 
     if (adjX < 0 || adjY < 0) { setHoverOverlay(null); return; }
 
@@ -341,13 +363,13 @@ export default function SheetPage() {
     const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
 
     setHoverOverlay({
-      left:   oL + ROW_HEADER_W - sl + xAcc,
-      top:    oT + COL_HEADER_H - st + yAcc,
+      left:   oL - sl + xAcc,
+      top:    oT - st + yAcc,
       width:  colLens[col] ?? DW,
       height: rowLens[row] ?? DH,
       color, username: change?.username ?? null,
     });
-  }, [sheets, activeSheetIdx, cellHighlights, userColors, measureGridOrigin, ROW_HEADER_W, COL_HEADER_H]);
+  }, [sheets, activeSheetIdx, cellHighlights, userColors, measureGridOrigin]);
 
   const handleWorkbookMouseLeave = useCallback(() => {
     setHoverOverlay(null);
@@ -356,11 +378,14 @@ export default function SheetPage() {
   // Navigate to cell from history click — scroll there and highlight with a pulsing overlay
   const navigateToCell = useCallback((sheetIndex: number, r: number, c: number) => {
     setActiveSheetIdx(sheetIndex);
-    setNavHighlight({ r, c, sheetIdx: sheetIndex });
-    setTimeout(() => setNavHighlight(null), 2500);
+    setHoverOverlay(null);
 
     const wrapper = workbookWrapperRef.current;
     if (!wrapper) return;
+
+    // Ensure grid origin is measured before we scroll
+    if (gridOriginRef.current.top < 0) measureGridOrigin();
+
     const curSheet = (latestSheetsRef.current ?? sheets)[sheetIndex];
     const colLens = curSheet?.config?.columnlen ?? {};
     const rowLens = curSheet?.config?.rowlen ?? {};
@@ -368,13 +393,27 @@ export default function SheetPage() {
     let scrollX = 0; for (let i = 0; i < c; i++) scrollX += (colLens[i] ?? DW);
     let scrollY = 0; for (let i = 0; i < r; i++) scrollY += (rowLens[i] ?? DH);
 
-    // Scroll all scrollable containers within the workbook
+    // Scroll scrollable containers and update sheetScrollRef immediately (don't wait for event)
     const all = Array.from(wrapper.querySelectorAll('*')) as HTMLElement[];
     for (const el of all) {
-      if (el.scrollHeight > el.clientHeight + 2) el.scrollTop = Math.max(0, scrollY - 80);
-      if (el.scrollWidth  > el.clientWidth  + 2) el.scrollLeft = Math.max(0, scrollX - 80);
+      if (el.scrollHeight > el.clientHeight + 2) {
+        const st = Math.max(0, scrollY - 80);
+        el.scrollTop = st;
+        sheetScrollRef.current = { ...sheetScrollRef.current, top: st };
+      }
+      if (el.scrollWidth > el.clientWidth + 2) {
+        const sl = Math.max(0, scrollX - 80);
+        el.scrollLeft = sl;
+        sheetScrollRef.current = { ...sheetScrollRef.current, left: sl };
+      }
     }
-  }, [sheets]);
+
+    // Show highlight after a tick so React re-renders with updated scroll ref
+    setTimeout(() => {
+      setNavHighlight({ r, c, sheetIdx: sheetIndex });
+      setTimeout(() => setNavHighlight(null), 2500);
+    }, 30);
+  }, [sheets, measureGridOrigin]);
 
   const computeChangedCells = useCallback((current: any[], prev: any[] | null): CellChange[] => {
     if (!prev) return [];
@@ -680,6 +719,7 @@ export default function SheetPage() {
           ref={workbookWrapperRef}
           onMouseEnter={() => { gridOriginRef.current = { top: -1, left: -1 }; }}
           onMouseMove={handleWorkbookMouseMove}
+          onMouseDown={() => { setHoverOverlay(null); setNavHighlight(null); }}
           onMouseLeave={handleWorkbookMouseLeave}
         >
           {/* Hover overlay — highlights the cell under the cursor */}
