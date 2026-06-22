@@ -82,7 +82,7 @@ io.on('connection', (socket) => {
     io.emit('user-color-changed', { username: socket.user.username, color });
   });
 
-  socket.on('save-sheet', async ({ sheetId, sheetIndex, data, summary, changedCells }) => {
+  socket.on('save-sheet', async ({ sheetId, sheetIndex, data, summary, changedCells, logChange }) => {
     try {
       await query(
         `INSERT INTO spreadsheet_data (spreadsheet_id, sheet_index, data)
@@ -91,20 +91,23 @@ io.on('connection', (socket) => {
         [sheetId, sheetIndex, JSON.stringify(data)]
       );
       await query('UPDATE spreadsheets SET updated_at = NOW() WHERE id = $1', [sheetId]);
-      await query(
-        `INSERT INTO change_log (spreadsheet_id, sheet_index, user_id, username, summary, changed_cells)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [sheetId, sheetIndex, socket.user.id, socket.user.username, summary || null,
-         changedCells ? JSON.stringify(changedCells) : null]
-      );
-      const entry = {
-        username: socket.user.username,
-        sheet_index: sheetIndex,
-        summary: summary || null,
-        changed_cells: changedCells || null,
-        saved_at: new Date().toISOString(),
-      };
-      io.to(sheetId).emit('changelog-update', entry);
+      // Only write one changelog entry per save operation (logChange flag from frontend)
+      if (logChange) {
+        await query(
+          `INSERT INTO change_log (spreadsheet_id, sheet_index, user_id, username, summary, changed_cells)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [sheetId, sheetIndex, socket.user.id, socket.user.username, summary || null,
+           changedCells ? JSON.stringify(changedCells) : null]
+        );
+        const entry = {
+          username: socket.user.username,
+          sheet_index: sheetIndex,
+          summary: summary || null,
+          changed_cells: changedCells || null,
+          saved_at: new Date().toISOString(),
+        };
+        io.to(sheetId).emit('changelog-update', entry);
+      }
     } catch (err) {
       socket.emit('error', err.message);
     }

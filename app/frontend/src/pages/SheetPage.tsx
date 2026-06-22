@@ -347,15 +347,35 @@ export default function SheetPage() {
     if (canvasOriginRef.current.top < 0) measureGridOrigin();
 
     const wRect = wrapper.getBoundingClientRect();
-    // Mouse position relative to the FortuneSheet canvas area (CSS px)
+    // Mouse in canvas-local CSS coordinates (canvas origin = top-left of the grid area)
     const cx = e.clientX - wRect.left - canvasOriginRef.current.left;
     const cy = e.clientY - wRect.top  - canvasOriginRef.current.top;
+    if (cx < 0 || cy < 0) { setHoverOverlay(null); return; }
 
+    const cL = canvasOriginRef.current.left;
+    const cT = canvasOriginRef.current.top;
+
+    // PRIMARY: iterate afterRenderCell map — FortuneSheet gives us exact CSS rects.
+    // This handles merges, custom column/row sizes, and any scaling perfectly.
+    const map = cellRectMapRef.current;
+    for (const [key, rect] of map) {
+      if (cx >= rect.x && cx < rect.x + rect.w && cy >= rect.y && cy < rect.y + rect.h) {
+        const [row, col] = key.split('_').map(Number);
+        const hKey = `${activeSheetIdx}_${row}_${col}`;
+        const change = cellHighlights[hKey];
+        const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
+        setHoverOverlay({
+          left: cL + rect.x, top: cT + rect.y,
+          width: rect.w,     height: rect.h,
+          color, username: change?.username ?? null,
+        });
+        return;
+      }
+    }
+
+    // FALLBACK for empty cells not rendered by FortuneSheet: use scroll-offset math.
     const { rowHeaderW, colHeaderH } = headerSizeRef.current;
-    // Ignore header area
     if (cx < rowHeaderW || cy < colHeaderH) { setHoverOverlay(null); return; }
-
-    // Translate mouse → content coordinates (accounting for virtual scroll)
     const { sx, sy } = scrollOffsetRef.current;
     const contentX = cx - rowHeaderW + sx;
     const contentY = cy - colHeaderH + sy;
@@ -365,55 +385,24 @@ export default function SheetPage() {
     const colLens: Record<number, number> = sheetData?.config?.columnlen ?? {};
     const rowLens: Record<number, number> = sheetData?.config?.rowlen ?? {};
     const DW = 73, DH = 19;
-
-    // Find column
     let col = -1, colAcc = 0;
-    for (let c = 0; c < 500; c++) {
-      const w = colLens[c] ?? DW;
-      if (contentX < colAcc + w) { col = c; break; }
-      colAcc += w;
-    }
-    // Find row
+    for (let c = 0; c < 500; c++) { const w = colLens[c] ?? DW; if (contentX < colAcc + w) { col = c; break; } colAcc += w; }
     let row = -1, rowAcc = 0;
-    for (let r = 0; r < 10000; r++) {
-      const h = rowLens[r] ?? DH;
-      if (contentY < rowAcc + h) { row = r; break; }
-      rowAcc += h;
-    }
+    for (let r = 0; r < 10000; r++) { const h = rowLens[r] ?? DH; if (contentY < rowAcc + h) { row = r; break; } rowAcc += h; }
     if (row < 0 || col < 0) { setHoverOverlay(null); return; }
 
-    // Redirect to merge master if this cell is a slave
-    const merges: Record<string, { r: number; c: number; rs: number; cs: number }> =
-      sheetData?.config?.merge ?? {};
-    for (const m of Object.values(merges)) {
-      if (row >= m.r && row < m.r + m.rs && col >= m.c && col < m.c + m.cs) {
-        row = m.r; col = m.c;
-        break;
-      }
-    }
-
+    // Only show fallback hover on cells with history (we can't reliably size empty cells)
     const hKey = `${activeSheetIdx}_${row}_${col}`;
     const change = cellHighlights[hKey];
-    const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
-    const username = change?.username ?? null;
+    if (!change) { setHoverOverlay(null); return; }
 
-    // Use exact position from afterRenderCell map (FortuneSheet computes this correctly).
-    // Fall back to mathematical estimate only for empty cells not in the map.
-    const cL = canvasOriginRef.current.left;
-    const cT = canvasOriginRef.current.top;
-    const mapEntry = cellRectMapRef.current.get(`${row}_${col}`);
-    if (mapEntry) {
-      setHoverOverlay({
-        left: cL + mapEntry.x, top: cT + mapEntry.y,
-        width: mapEntry.w,     height: mapEntry.h,
-        color, username,
-      });
-    } else {
-      // Cell not in map (empty) — use mathematical fallback
-      const mergeSpan = merges[`${row}_${col}`] ? { rs: merges[`${row}_${col}`].rs, cs: merges[`${row}_${col}`].cs } : undefined;
-      const rect = getCellCSSRect(activeSheetIdx, row, col, mergeSpan);
-      setHoverOverlay({ ...rect, color, username });
+    const merges: Record<string, { r: number; c: number; rs: number; cs: number }> = sheetData?.config?.merge ?? {};
+    for (const m of Object.values(merges)) {
+      if (row >= m.r && row < m.r + m.rs && col >= m.c && col < m.c + m.cs) { row = m.r; col = m.c; break; }
     }
+    const ms = merges[`${row}_${col}`];
+    const rect = getCellCSSRect(activeSheetIdx, row, col, ms ? { rs: ms.rs, cs: ms.cs } : undefined);
+    setHoverOverlay({ ...rect, color: userColors[change.username] ?? '#3B82F6', username: change.username });
   }, [activeSheetIdx, cellHighlights, userColors, measureGridOrigin, sheets, getCellCSSRect]);
 
   const handleWorkbookMouseLeave = useCallback(() => {
@@ -509,8 +498,10 @@ export default function SheetPage() {
         sheetId: id,
         sheetIndex: s.index ?? i,
         data,
-        summary: summary || null,
-        changedCells: changedCells || null,
+        // Only log changelog for the first sheet — prevents N duplicate history entries
+        logChange: i === 0,
+        summary: i === 0 ? (summary || null) : null,
+        changedCells: i === 0 ? (changedCells || null) : null,
       });
     });
   }, [id]);
