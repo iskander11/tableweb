@@ -236,6 +236,13 @@ export default function SheetPage() {
     api.get(`/spreadsheets/${id}/changelog`).then((r) => setChangelog(r.data));
   }, [showHistory, id]);
 
+  // When history panel opens/closes the workbook area resizes → canvas shifts → reset origin
+  useEffect(() => {
+    canvasOriginRef.current = { top: -1, left: 0 };
+    gridOriginRef.current   = { top: -1, left: -1 };
+    setHoverOverlay(null);
+  }, [showHistory]);
+
   useEffect(() => {
     if (!token) return;
     const socket = io('/', { auth: { token } });
@@ -498,26 +505,20 @@ export default function SheetPage() {
         sheetId: id,
         sheetIndex: s.index ?? i,
         data,
-        // Only log changelog for the first sheet — prevents N duplicate history entries
+        // Backend computes the diff from DB; only the first sheet gets a changelog entry
         logChange: i === 0,
-        summary: i === 0 ? (summary || null) : null,
-        changedCells: i === 0 ? (changedCells || null) : null,
       });
     });
   }, [id]);
 
   const handleSaveNow = useCallback(() => {
     const all = latestSheetsRef.current || sheets;
-    const summary = buildSummary(all);
-    const changedCells = computeChangedCells(all, lastSavedSheetsRef.current);
     setSaveState('saving');
-    saveAll(all, summary, changedCells);
-    // Deep clone so mutations by FortuneSheet don't affect the saved baseline
-    lastSavedSheetsRef.current = JSON.parse(JSON.stringify(all));
+    saveAll(all);
     setIsDirty(false);
     setSaveState('saved');
     setTimeout(() => setSaveState('idle'), 2000);
-  }, [saveAll, buildSummary, sheets]);
+  }, [saveAll, sheets]);
 
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;

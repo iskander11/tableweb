@@ -82,8 +82,25 @@ io.on('connection', (socket) => {
     io.emit('user-color-changed', { username: socket.user.username, color });
   });
 
-  socket.on('save-sheet', async ({ sheetId, sheetIndex, data, summary, changedCells, logChange }) => {
+  socket.on('save-sheet', async ({ sheetId, sheetIndex, data, logChange }) => {
     try {
+      // Compute diff server-side before overwriting (backend always has the ground truth)
+      let changedCells = null;
+      let summary = null;
+      if (logChange) {
+        try {
+          const prev = await query(
+            'SELECT data FROM spreadsheet_data WHERE spreadsheet_id = $1 AND sheet_index = $2',
+            [sheetId, sheetIndex]
+          );
+          if (prev.rows.length > 0) {
+            const diff = computeSheetDiff(prev.rows[0].data, data);
+            changedCells = diff.cells.length > 0 ? diff.cells : null;
+            summary = diff.summary;
+          }
+        } catch (_) { /* diff failure must not block the save */ }
+      }
+
       await query(
         `INSERT INTO spreadsheet_data (spreadsheet_id, sheet_index, data)
          VALUES ($1, $2, $3)
@@ -91,7 +108,7 @@ io.on('connection', (socket) => {
         [sheetId, sheetIndex, JSON.stringify(data)]
       );
       await query('UPDATE spreadsheets SET updated_at = NOW() WHERE id = $1', [sheetId]);
-      // Only write one changelog entry per save operation (logChange flag from frontend)
+
       if (logChange) {
         await query(
           `INSERT INTO change_log (spreadsheet_id, sheet_index, user_id, username, summary, changed_cells)
@@ -163,3 +180,54 @@ cron.schedule('0 2 * * 0', async () => {
 
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// ── Diff helpers ──────────────────────────────────────────────────────────────
+
+function colNameFromIndex(c) {
+  let name = '';
+  c += 1;
+  while (c > 0) { c -= 1; name = String.fromCharCode(65 + (c % 26)) + name; c = Math.floor(c / 26); }
+  return name;
+}
+
+// Flatten sheet data (as sent by the frontend) into a { "r_c": cellObj } map.
+// The frontend saves data.cells = cellsFromSheet(s) which is already flat { "r_c": {...} }.
+function flattenSavedCells(data) {
+  if (data && typeof data === 'object' && data.cells) return data.cells;
+  return {};
+}
+
+function computeSheetDiff(prevDataRaw, currData) {
+  const prevCells = flattenSavedCells(
+    typeof prevDataRaw === 'string' ? JSON.parse(prevDataRaw) : prevDataRaw
+  );
+  const currCells = flattenSavedCells(currData);
+
+  const allKeys = new Set([...Object.keys(prevCells), ...Object.keys(currCells)]);
+  const changes = [];
+
+  for (const key of allKeys) {
+    const pv = String(prevCells[key]?.v ?? prevCells[key]?.m ?? '').trim();
+    const cv = String(currCells[key]?.v ?? currCells[key]?.m ?? '').trim();
+    if (pv === cv) continue;
+    if (pv === '' && cv === '') continue;
+    const [r, c] = key.split('_').map(Number);
+    changes.push({
+      key,
+      col: `${colNameFromIndex(c)}${r + 1}`,
+      newVal: cv.slice(0, 100),
+      oldVal: pv.slice(0, 100),
+    });
+    if (changes.length >= 200) break;
+  }
+
+  let summary = null;
+  if (changes.length > 0) {
+    const examples = changes.slice(0, 3).map(ch =>
+      `${ch.col}${ch.newVal ? ` ("${ch.newVal.slice(0, 20)}")` : ' (удалено)'}`
+    );
+    summary = `Изменено ячеек: ${changes.length} (${examples.join(', ')})`;
+  }
+
+  return { cells: changes, summary };
+}
