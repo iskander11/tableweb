@@ -298,7 +298,6 @@ export default function SheetPage() {
       // afterRenderCell gives device-pixel coords; divide by this ratio to get CSS px
       const ratio = pick.el.width / (pick.el.offsetWidth || 1);
       canvasPxRatioRef.current = ratio > 0 ? ratio : 1;
-      console.log('[Canvas] offsetWidth:', pick.el.offsetWidth, 'attr width:', pick.el.width, 'ratio:', canvasPxRatioRef.current);
     } else {
       canvasOriginRef.current = { top: editor ? 68 : 28, left: 0 };
       gridOriginRef.current   = { top: editor ? 88 : 48, left: ROW_HEADER_W };
@@ -825,9 +824,6 @@ export default function SheetPage() {
                 return true;
               },
               afterRenderCell: (_cell, cellInfo, _ctx) => {
-                if (cellInfo.row === 0 && cellInfo.column === 0) {
-                  console.log('[afterRenderCell(0,0)] startX:', cellInfo.startX, 'startY:', cellInfo.startY, 'endX:', cellInfo.endX, 'endY:', cellInfo.endY, 'ratio:', canvasPxRatioRef.current);
-                }
                 cellRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
                   x: cellInfo.startX, y: cellInfo.startY,
                   w: cellInfo.endX - cellInfo.startX,
