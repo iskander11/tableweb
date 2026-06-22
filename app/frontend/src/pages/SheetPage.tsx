@@ -110,18 +110,20 @@ export default function SheetPage() {
   // When navigating from history — show a highlighted border on that cell for 2s
   const [navHighlight, setNavHighlight] = useState<{ r: number; c: number; sheetIdx: number } | null>(null);
   const workbookWrapperRef = useRef<HTMLDivElement>(null);
-  const sheetScrollRef = useRef({ top: 0, left: 0 });
-  // Canvas top-left relative to wrapper (without header offsets)
+  // Canvas top-left relative to wrapper
   const canvasOriginRef = useRef({ top: -1, left: 0 });
-  // Kept for getCellRect fallback; set = canvasOriginRef + header offsets
   const gridOriginRef = useRef({ top: -1, left: -1 });
-  // Cell rect cache filled by FortuneSheet's afterRenderCell hook (in canvas-pixel coords)
-  const cellRectMapRef = useRef<Map<string, { x: number; y: number; w: number; h: number }>>(new Map());
-  // Pending map collects cells during a render pass; swapped into cellRectMapRef after render batch
-  const pendingRectMapRef = useRef<Map<string, { x: number; y: number; w: number; h: number }>>(new Map());
-  const renderBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // canvas.width / canvas.offsetWidth — converts canvas device-px to CSS-px
   const canvasPxRatioRef = useRef(1);
+  // Header sizes in CSS px, calibrated from cell(0,0) via afterRenderCell
+  const headerSizeRef = useRef({ rowHeaderW: 46, colHeaderH: 20 });
+  // Current virtual scroll offset in CSS px (content scrolled left/up by this amount)
+  // Updated on every afterRenderCell so it's always fresh
+  const scrollOffsetRef = useRef({ sx: 0, sy: 0 });
+  // Mirror of activeSheetIdx for use inside stable useMemo hooks
+  const activeSheetIdxRef = useRef(0);
+  // Keep ref in sync so stable hooks can read current sheet index
+  useEffect(() => { activeSheetIdxRef.current = activeSheetIdx; }, [activeSheetIdx]);
   const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
@@ -142,27 +144,13 @@ export default function SheetPage() {
     }).catch(() => {});
   }, []);
 
-  // Track FortuneSheet scroll in capture phase so we can accurately position the cell overlay
+  // Reset calibration on workbook remount
   useEffect(() => {
-    const wrapper = workbookWrapperRef.current;
-    if (!wrapper) return;
-    // Reset grid origin so it's re-measured after workbook re-renders
     gridOriginRef.current = { top: -1, left: -1 };
     canvasOriginRef.current = { top: -1, left: 0 };
-    cellRectMapRef.current.clear();
-    sheetScrollRef.current = { top: 0, left: 0 };
-
-    const onScroll = (e: Event) => {
-      const el = e.target as HTMLElement;
-      if (!el || el === wrapper) return;
-      const canScrollV = el.scrollHeight > el.clientHeight;
-      const canScrollH = el.scrollWidth > el.clientWidth;
-      if (canScrollV) sheetScrollRef.current = { ...sheetScrollRef.current, top: el.scrollTop };
-      if (canScrollH) sheetScrollRef.current = { ...sheetScrollRef.current, left: el.scrollLeft };
-    };
-    wrapper.addEventListener('scroll', onScroll, true);
-    return () => wrapper.removeEventListener('scroll', onScroll, true);
-  }, [workbookKey]); // re-attach when workbook remounts
+    scrollOffsetRef.current = { sx: 0, sy: 0 };
+    headerSizeRef.current = { rowHeaderW: 46, colHeaderH: 20 };
+  }, [workbookKey]);
 
   // Reset grid origin measurement when browser zoom changes (devicePixelRatio changes)
   useEffect(() => {
@@ -171,8 +159,8 @@ export default function SheetPage() {
       if (window.devicePixelRatio !== lastDpr) {
         lastDpr = window.devicePixelRatio;
         gridOriginRef.current = { top: -1, left: -1 };
-    canvasOriginRef.current = { top: -1, left: 0 };
-    cellRectMapRef.current.clear();
+        canvasOriginRef.current = { top: -1, left: 0 };
+        scrollOffsetRef.current = { sx: 0, sy: 0 };
         setHoverOverlay(null);
       }
     };
@@ -255,7 +243,14 @@ export default function SheetPage() {
     });
 
     socket.on('changelog-update', (entry: ChangeEntry) => {
-      setChangelog((prev) => [entry, ...prev].slice(0, 100));
+      setChangelog((prev) => {
+        // Deduplicate: skip if an entry with same username and timestamp already exists
+        const isDup = prev.some(
+          (e) => e.username === entry.username && e.saved_at === entry.saved_at
+        );
+        if (isDup) return prev;
+        return [entry, ...prev].slice(0, 100);
+      });
       // Update cell highlights for cells changed by others
       if (entry.changed_cells) {
         setCellHighlights((prev) => {
@@ -308,44 +303,36 @@ export default function SheetPage() {
     }
   }, [editor, ROW_HEADER_W, COL_HEADER_H]);
 
-  // Read current scroll state — tries DOM scrollTop first, falls back to 0.
-  // NOTE: FortuneSheet uses virtual canvas (no DOM scrollTop); scroll is tracked via wheel events.
-  const readScrollState = useCallback((): { top: number; left: number } => {
-    const wrapper = workbookWrapperRef.current;
-    if (!wrapper) return { top: 0, left: 0 };
-    let top = 0, left = 0;
-    for (const el of Array.from(wrapper.querySelectorAll('*')) as HTMLElement[]) {
-      if (el.scrollTop  > top)  top  = el.scrollTop;
-      if (el.scrollLeft > left) left = el.scrollLeft;
-    }
-    return { top, left };
-  }, []);
+  // Compute the CSS rect of any cell relative to workbookWrapper using column/row widths
+  // and the virtual scroll offset derived from afterRenderCell calibration.
+  const getCellCSSRect = useCallback((sheetIdx: number, row: number, col: number, mergeSpan?: { rs: number; cs: number }) => {
+    if (canvasOriginRef.current.top < 0) measureGridOrigin();
+    const cL = canvasOriginRef.current.left;
+    const cT = canvasOriginRef.current.top;
+    const { rowHeaderW, colHeaderH } = headerSizeRef.current;
+    const { sx, sy } = scrollOffsetRef.current;
+    const sheetData = (latestSheetsRef.current ?? sheets)[sheetIdx];
+    const colLens: Record<number, number> = sheetData?.config?.columnlen ?? {};
+    const rowLens: Record<number, number> = sheetData?.config?.rowlen ?? {};
+    const DW = 73, DH = 19;
 
-  // Default row/col sizes from sheet config (FortuneSheet may store these)
-  const getSheetDefaults = useCallback((sheet: any) => ({
-    DW: sheet?.defaultColWidth  ?? sheet?.config?.defaultcolwidth  ?? 73,
-    DH: sheet?.defaultRowHeight ?? sheet?.config?.defaultrowheight ?? 19,
-  }), []);
+    let xAcc = rowHeaderW;
+    for (let i = 0; i < col; i++) xAcc += (colLens[i] ?? DW);
+    let yAcc = colHeaderH;
+    for (let i = 0; i < row; i++) yAcc += (rowLens[i] ?? DH);
 
-  // Compute cell rect (relative to workbookWrapper) for a given sheet/row/col.
-  const getCellRect = useCallback((sheetIdx: number, row: number, col: number) => {
-    if (gridOriginRef.current.top < 0) measureGridOrigin();
-    if (gridOriginRef.current.top < 0) return null;
-    const curSheet = (latestSheetsRef.current ?? sheets)[sheetIdx];
-    const colLens = curSheet?.config?.columnlen ?? {};
-    const rowLens = curSheet?.config?.rowlen ?? {};
-    const { DW, DH } = getSheetDefaults(curSheet);
-    let xAcc = 0; for (let i = 0; i < col; i++) xAcc += (colLens[i] ?? DW);
-    let yAcc = 0; for (let i = 0; i < row; i++) yAcc += (rowLens[i] ?? DH);
-    const { top: oT, left: oL } = gridOriginRef.current;
-    const { top: st, left: sl } = readScrollState();
+    const rs = mergeSpan?.rs ?? 1;
+    const cs = mergeSpan?.cs ?? 1;
+    let cellW = 0; for (let i = col; i < col + cs; i++) cellW += (colLens[i] ?? DW);
+    let cellH = 0; for (let i = row; i < row + rs; i++) cellH += (rowLens[i] ?? DH);
+
     return {
-      left:   oL - sl + xAcc,
-      top:    oT - st + yAcc,
-      width:  colLens[col] ?? DW,
-      height: rowLens[row] ?? DH,
+      left:   cL + xAcc - sx,
+      top:    cT + yAcc - sy,
+      width:  cellW,
+      height: cellH,
     };
-  }, [sheets, measureGridOrigin, readScrollState, getSheetDefaults]);
+  }, [sheets, measureGridOrigin]);
 
   const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const wrapper = workbookWrapperRef.current;
@@ -353,47 +340,66 @@ export default function SheetPage() {
     if (canvasOriginRef.current.top < 0) measureGridOrigin();
 
     const wRect = wrapper.getBoundingClientRect();
-    // Mouse position in canvas-local coordinates
+    // Mouse position relative to the FortuneSheet canvas area (CSS px)
     const cx = e.clientX - wRect.left - canvasOriginRef.current.left;
     const cy = e.clientY - wRect.top  - canvasOriginRef.current.top;
 
-    if (cx < 0 || cy < 0) { setHoverOverlay(null); return; }
+    const { rowHeaderW, colHeaderH } = headerSizeRef.current;
+    // Ignore header area
+    if (cx < rowHeaderW || cy < colHeaderH) { setHoverOverlay(null); return; }
 
-    // Find the cell whose rendered rect contains (cx, cy)
-    // cellRectMapRef is populated by the cellRenderAfter hook on every FortuneSheet redraw.
-    // afterRenderCell coords are in canvas device-pixels; divide by ratio to get CSS px
-    const ratio = canvasPxRatioRef.current;
-    const map = cellRectMapRef.current;
-    let foundKey: string | null = null;
-    let foundRect: { x: number; y: number; w: number; h: number } | null = null;
+    // Translate mouse → content coordinates (accounting for virtual scroll)
+    const { sx, sy } = scrollOffsetRef.current;
+    const contentX = cx - rowHeaderW + sx;
+    const contentY = cy - colHeaderH + sy;
+    if (contentX < 0 || contentY < 0) { setHoverOverlay(null); return; }
 
-    for (const [key, rect] of map) {
-      const rx = rect.x / ratio, ry = rect.y / ratio;
-      const rw = rect.w / ratio, rh = rect.h / ratio;
-      if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {
-        foundKey = key;
-        foundRect = rect;
+    const sheetData = (latestSheetsRef.current ?? sheets)[activeSheetIdx];
+    const colLens: Record<number, number> = sheetData?.config?.columnlen ?? {};
+    const rowLens: Record<number, number> = sheetData?.config?.rowlen ?? {};
+    const DW = 73, DH = 19;
+
+    // Find column
+    let col = -1, colAcc = 0;
+    for (let c = 0; c < 500; c++) {
+      const w = colLens[c] ?? DW;
+      if (contentX < colAcc + w) { col = c; break; }
+      colAcc += w;
+    }
+    // Find row
+    let row = -1, rowAcc = 0;
+    for (let r = 0; r < 10000; r++) {
+      const h = rowLens[r] ?? DH;
+      if (contentY < rowAcc + h) { row = r; break; }
+      rowAcc += h;
+    }
+    if (row < 0 || col < 0) { setHoverOverlay(null); return; }
+
+    // Redirect to merge master if this cell is a slave
+    const merges: Record<string, { r: number; c: number; rs: number; cs: number }> =
+      sheetData?.config?.merge ?? {};
+    let mergeSpan: { rs: number; cs: number } | undefined;
+    for (const m of Object.values(merges)) {
+      if (row >= m.r && row < m.r + m.rs && col >= m.c && col < m.c + m.cs) {
+        row = m.r; col = m.c;
+        mergeSpan = { rs: m.rs, cs: m.cs };
         break;
       }
     }
+    if (!mergeSpan && merges[`${row}_${col}`]) {
+      const m = merges[`${row}_${col}`];
+      mergeSpan = { rs: m.rs, cs: m.cs };
+    }
 
-    if (!foundKey || !foundRect) { setHoverOverlay(null); return; }
-
-    const [row, col] = foundKey.split('_').map(Number);
     const hKey = `${activeSheetIdx}_${row}_${col}`;
     const change = cellHighlights[hKey];
-    const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
-    const cL = canvasOriginRef.current.left;
-    const cT = canvasOriginRef.current.top;
+    if (!change) { setHoverOverlay(null); return; }
 
-    setHoverOverlay({
-      left:   cL + foundRect.x / ratio,
-      top:    cT + foundRect.y / ratio,
-      width:  foundRect.w / ratio,
-      height: foundRect.h / ratio,
-      color, username: change?.username ?? null,
-    });
-  }, [activeSheetIdx, cellHighlights, userColors, measureGridOrigin]);
+    const color = userColors[change.username] ?? '#3B82F6';
+    const rect = getCellCSSRect(activeSheetIdx, row, col, mergeSpan);
+
+    setHoverOverlay({ ...rect, color, username: change.username });
+  }, [activeSheetIdx, cellHighlights, userColors, measureGridOrigin, sheets, getCellCSSRect]);
 
   const handleWorkbookMouseLeave = useCallback(() => {
     setHoverOverlay(null);
@@ -577,20 +583,33 @@ export default function SheetPage() {
   };
 
   // Stable hooks object — must NOT be recreated on re-renders or FortuneSheet
-  // re-registers hooks → triggers re-render → infinite loop → afterRenderCell fires endlessly
+  // re-registers hooks → triggers re-render → infinite loop → afterRenderCell fires endlessly.
+  // We use afterRenderCell only to calibrate header sizes and compute the virtual scroll offset.
   const workbookHooks = useMemo(() => ({
     afterRenderCell: (_cell: any, cellInfo: any, _ctx: any) => {
-      pendingRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
-        x: cellInfo.startX, y: cellInfo.startY,
-        w: cellInfo.endX - cellInfo.startX,
-        h: cellInfo.endY - cellInfo.startY,
-      });
-      if (renderBatchTimerRef.current !== null) clearTimeout(renderBatchTimerRef.current);
-      renderBatchTimerRef.current = setTimeout(() => {
-        cellRectMapRef.current = pendingRectMapRef.current;
-        pendingRectMapRef.current = new Map();
-        renderBatchTimerRef.current = null;
-      }, 50);
+      const ratio = canvasPxRatioRef.current > 0 ? canvasPxRatioRef.current : 1;
+      const r = cellInfo.row as number;
+      const c = cellInfo.column as number;
+      const actualX = cellInfo.startX / ratio;
+      const actualY = cellInfo.startY / ratio;
+
+      // Calibrate row/col header pixel sizes from the top-left data cell
+      if (r === 0 && c === 0) {
+        headerSizeRef.current = { rowHeaderW: actualX, colHeaderH: actualY };
+      }
+
+      // Derive current virtual scroll offset:
+      //   canvas_x = rowHeaderW + sum(colWidths[0..c-1]) - scrollX
+      //   → scrollX = rowHeaderW + sum(colWidths[0..c-1]) - canvas_x
+      const sheetData = latestSheetsRef.current?.[activeSheetIdxRef.current];
+      const colLens: Record<number, number> = sheetData?.config?.columnlen ?? {};
+      const rowLens: Record<number, number> = sheetData?.config?.rowlen ?? {};
+      const DW = 73, DH = 19;
+      const { rowHeaderW, colHeaderH } = headerSizeRef.current;
+      let expX = rowHeaderW, expY = colHeaderH;
+      for (let i = 0; i < c; i++) expX += (colLens[i] ?? DW);
+      for (let i = 0; i < r; i++) expY += (rowLens[i] ?? DH);
+      scrollOffsetRef.current = { sx: expX - actualX, sy: expY - actualY };
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -787,11 +806,13 @@ export default function SheetPage() {
 
           {/* Navigation highlight — shown 2.5s after clicking a history entry */}
           {navHighlight && (() => {
-            const mapRect = cellRectMapRef.current.get(`${navHighlight.r}_${navHighlight.c}`);
-            if (!mapRect) return null;
-            const ratio = canvasPxRatioRef.current;
-            const cL = canvasOriginRef.current.left;
-            const cT = canvasOriginRef.current.top;
+            // Use mathematical position (getCellCSSRect) — works for any cell including empty ones.
+            // getCellCSSRect uses scrollOffsetRef which is updated by afterRenderCell after the scroll.
+            const merges: Record<string, { r: number; c: number; rs: number; cs: number }> =
+              ((latestSheetsRef.current ?? sheets)[navHighlight.sheetIdx]?.config?.merge) ?? {};
+            const m = merges[`${navHighlight.r}_${navHighlight.c}`];
+            const span = m ? { rs: m.rs, cs: m.cs } : undefined;
+            const rect = getCellCSSRect(navHighlight.sheetIdx, navHighlight.r, navHighlight.c, span);
             const hKey = `${navHighlight.sheetIdx}_${navHighlight.r}_${navHighlight.c}`;
             const change = cellHighlights[hKey];
             const color = change ? (userColors[change.username] ?? '#3B82F6') : '#3B82F6';
@@ -799,10 +820,10 @@ export default function SheetPage() {
               <div
                 style={{
                   position: 'absolute',
-                  left: cL + mapRect.x / ratio,
-                  top:  cT + mapRect.y / ratio,
-                  width:  mapRect.w / ratio,
-                  height: mapRect.h / ratio,
+                  left:   rect.left,
+                  top:    rect.top,
+                  width:  rect.width,
+                  height: rect.height,
                   background: color + '44',
                   border: `2px solid ${color}`,
                   pointerEvents: 'none',
