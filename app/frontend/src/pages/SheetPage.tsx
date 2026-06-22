@@ -367,6 +367,8 @@ export default function SheetPage() {
     let foundKey: string | null = null;
     let foundRect: { x: number; y: number; w: number; h: number } | null = null;
 
+    console.log('[HOVER] cx:', cx.toFixed(1), 'cy:', cy.toFixed(1), 'mapSize:', map.size, 'ratio:', ratio);
+
     for (const [key, rect] of map) {
       const rx = rect.x / ratio, ry = rect.y / ratio;
       const rw = rect.w / ratio, rh = rect.h / ratio;
@@ -826,15 +828,17 @@ export default function SheetPage() {
             allowEdit={editor}
             hooks={{
               afterRenderCell: (_cell, cellInfo, _ctx) => {
+                if (cellInfo.row === 0 && cellInfo.column === 0) {
+                  console.log('[HOOK] afterRenderCell(0,0) fired, startX:', cellInfo.startX, 'startY:', cellInfo.startY);
+                }
                 pendingRectMapRef.current.set(`${cellInfo.row}_${cellInfo.column}`, {
                   x: cellInfo.startX, y: cellInfo.startY,
                   w: cellInfo.endX - cellInfo.startX,
                   h: cellInfo.endY - cellInfo.startY,
                 });
-                // After all cells in this render pass have fired, swap pending → active.
-                // 50ms comfortably exceeds one frame, so the swap happens once per redraw.
                 if (renderBatchTimerRef.current !== null) clearTimeout(renderBatchTimerRef.current);
                 renderBatchTimerRef.current = setTimeout(() => {
+                  console.log('[HOOK] map swapped, size:', pendingRectMapRef.current.size);
                   cellRectMapRef.current = pendingRectMapRef.current;
                   pendingRectMapRef.current = new Map();
                   renderBatchTimerRef.current = null;
