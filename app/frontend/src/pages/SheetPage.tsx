@@ -35,26 +35,14 @@ interface ChangeEntry {
 // Map of "sheetIndex_r_c" → latest change info for cell highlighting
 type CellHighlightMap = Record<string, { username: string; saved_at: string; newVal: string }>;
 
-function buildSheets(sheetMeta: any, highlights: CellHighlightMap = {}) {
+function buildSheets(sheetMeta: any) {
   return (sheetMeta.sheets || []).map((s: any, i: number) => {
     const data = s.data || {};
-    const baseCells = flattenCells(data.cells || {});
-
-    // Inject yellow background + note into recently changed cells
-    const celldata = baseCells.map((cell: any) => {
-      const hKey = `${i}_${cell.r}_${cell.c}`;
-      const h = highlights[hKey];
-      if (!h) return cell;
-      const v = { ...(cell.v || {}) };
-      if (!v.bg) v.bg = '#FFF9C4';   // light yellow — only if no custom bg
-      return { ...cell, v };
-    });
-
     const sheet: any = {
       name: data.name || `Sheet${i + 1}`,
       index: i,
       status: 1,
-      celldata,
+      celldata: flattenCells(data.cells || {}),
       config: {
         columnlen: numericKeys(data.columnWidths || {}),
         rowlen: numericKeys(data.rowHeights || {}),
@@ -113,10 +101,15 @@ export default function SheetPage() {
   const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
   const [cellHighlights, setCellHighlights] = useState<CellHighlightMap>({});
   const [userColors, setUserColors] = useState<Record<string, string>>({});
-  const [hoveredCell, setHoveredCell] = useState<{ r: number; c: number } | null>(null);
-  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  // Overlay: absolute rect on the hovered cell + who edited it
+  const [hoverOverlay, setHoverOverlay] = useState<{
+    left: number; top: number; width: number; height: number;
+    color: string; username: string | null;
+  } | null>(null);
   const [activeSheetIdx, setActiveSheetIdx] = useState(0);
   const workbookWrapperRef = useRef<HTMLDivElement>(null);
+  const sheetScrollRef = useRef({ top: 0, left: 0 });
+  const gridOriginRef = useRef({ top: -1, left: -1 }); // measured from canvas on first move
   const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
@@ -136,6 +129,26 @@ export default function SheetPage() {
       setUserColors(map);
     }).catch(() => {});
   }, []);
+
+  // Track FortuneSheet scroll in capture phase so we can accurately position the cell overlay
+  useEffect(() => {
+    const wrapper = workbookWrapperRef.current;
+    if (!wrapper) return;
+    // Reset grid origin so it's re-measured after workbook re-renders
+    gridOriginRef.current = { top: -1, left: -1 };
+    sheetScrollRef.current = { top: 0, left: 0 };
+
+    const onScroll = (e: Event) => {
+      const el = e.target as HTMLElement;
+      if (!el || el === wrapper) return;
+      const canScrollV = el.scrollHeight > el.clientHeight;
+      const canScrollH = el.scrollWidth > el.clientWidth;
+      if (canScrollV) sheetScrollRef.current = { ...sheetScrollRef.current, top: el.scrollTop };
+      if (canScrollH) sheetScrollRef.current = { ...sheetScrollRef.current, left: el.scrollLeft };
+    };
+    wrapper.addEventListener('scroll', onScroll, true);
+    return () => wrapper.removeEventListener('scroll', onScroll, true);
+  }, [workbookKey]); // re-attach when workbook remounts
 
   useEffect(() => {
     if (fontsVersion > 0) {
@@ -174,13 +187,12 @@ export default function SheetPage() {
         }
       }
       setCellHighlights(map);
-      const built = buildSheets(sheetMeta, map);
+      const built = buildSheets(sheetMeta);
       const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
       setSheets(data);
       lastSavedSheetsRef.current = data;
     }).catch(() => {
-      // Changelog unavailable — still load sheet normally
-      const built = buildSheets(sheetMeta, {});
+      const built = buildSheets(sheetMeta);
       const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
       setSheets(data);
       lastSavedSheetsRef.current = data;
@@ -230,54 +242,84 @@ export default function SheetPage() {
     return () => { socket.disconnect(); };
   }, [id, token]);
 
-  // Calculate which cell is under the cursor inside the FortuneSheet workbook
+  // Measure grid origin from the largest canvas inside the workbook (done once per mount)
+  const measureGridOrigin = useCallback(() => {
+    const wrapper = workbookWrapperRef.current;
+    if (!wrapper) return;
+    const canvases = Array.from(wrapper.querySelectorAll('canvas'));
+    if (!canvases.length) return;
+    // The main cell canvas is the largest one
+    const main = canvases.reduce((a, b) =>
+      a.offsetWidth * a.offsetHeight >= b.offsetWidth * b.offsetHeight ? a : b
+    );
+    const wRect = wrapper.getBoundingClientRect();
+    const cRect = main.getBoundingClientRect();
+    gridOriginRef.current = {
+      top: cRect.top - wRect.top,
+      left: cRect.left - wRect.left,
+    };
+  }, []);
+
   const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const wrapper = workbookWrapperRef.current;
     if (!wrapper) return;
-    const rect = wrapper.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
 
-    // FortuneSheet approximate header offsets (row number column + col header row)
-    const ROW_HEADER_W = 46;
-    const COL_HEADER_H = 20;
-    // Try to read scroll from the FortuneSheet scroll containers
-    const scrollYEl = wrapper.querySelector('[class*="scrollbar-y"], [id*="scrollbar-y"], [class*="scroll-y"]') as HTMLElement | null;
-    const scrollXEl = wrapper.querySelector('[class*="scrollbar-x"], [id*="scrollbar-x"], [class*="scroll-x"]') as HTMLElement | null;
-    const scrollTop = scrollYEl?.scrollTop ?? 0;
-    const scrollLeft = scrollXEl?.scrollLeft ?? 0;
+    // Measure grid origin on first call after mount/remount
+    if (gridOriginRef.current.top < 0) measureGridOrigin();
 
-    const adjX = x - ROW_HEADER_W + scrollLeft;
-    const adjY = y - COL_HEADER_H + scrollTop;
+    const wRect = wrapper.getBoundingClientRect();
+    const x = e.clientX - wRect.left;
+    const y = e.clientY - wRect.top;
 
-    if (adjX < 0 || adjY < 0) { setHoveredCell(null); return; }
+    const { top: gridTop, left: gridLeft } = gridOriginRef.current;
+    const { top: scrollTop, left: scrollLeft } = sheetScrollRef.current;
+
+    // Position relative to cell grid origin + scroll
+    const adjX = x - gridLeft + scrollLeft;
+    const adjY = y - gridTop + scrollTop;
+
+    if (adjX < 0 || adjY < 0) { setHoverOverlay(null); return; }
 
     const curSheet = (latestSheetsRef.current ?? sheets)[activeSheetIdx];
     const colLens = curSheet?.config?.columnlen ?? {};
     const rowLens = curSheet?.config?.rowlen ?? {};
     const DEFAULT_W = 73, DEFAULT_H = 19;
 
+    // Find column
     let col = 0, xAcc = 0;
-    for (; col < 500; col++) {
+    while (col < 500) {
       const w = colLens[col] ?? DEFAULT_W;
       if (xAcc + w > adjX) break;
       xAcc += w;
+      col++;
     }
+    const cellW = colLens[col] ?? DEFAULT_W;
+
+    // Find row
     let row = 0, yAcc = 0;
-    for (; row < 2000; row++) {
+    while (row < 2000) {
       const h = rowLens[row] ?? DEFAULT_H;
       if (yAcc + h > adjY) break;
       yAcc += h;
+      row++;
     }
+    const cellH = rowLens[row] ?? DEFAULT_H;
 
-    setHoveredCell({ r: row, c: col });
-    setTooltipPos({ x: e.clientX, y: e.clientY });
-  }, [sheets, activeSheetIdx]);
+    // Absolute position of this cell relative to the wrapper div
+    const cellLeft = gridLeft - scrollLeft + xAcc;
+    const cellTop = gridTop - scrollTop + yAcc;
 
-  const handleWorkbookMouseLeave = useCallback(() => {
-    setHoveredCell(null);
-    setTooltipPos(null);
-  }, []);
+    const hKey = `${activeSheetIdx}_${row}_${col}`;
+    const change = cellHighlights[hKey];
+    const color = change ? (userColors[change.username] ?? '#3B82F6') : '#94a3b8';
+
+    setHoverOverlay({
+      left: cellLeft, top: cellTop, width: cellW, height: cellH,
+      color, username: change?.username ?? null,
+    });
+  }, [sheets, activeSheetIdx, cellHighlights, userColors, measureGridOrigin]);
+
+  const handleWorkbookMouseLeave = useCallback(() => setHoverOverlay(null), []);
 
   // Navigate to cell from history click
   const navigateToCell = useCallback((sheetIndex: number, r: number, c: number) => {
@@ -318,12 +360,12 @@ export default function SheetPage() {
       const prevCells = prevSheet ? cellsFromSheet(prevSheet) : {};
       const allKeys = new Set([...Object.keys(currCells), ...Object.keys(prevCells)]);
       for (const key of allKeys) {
-        const cv = String(currCells[key]?.v ?? currCells[key]?.m ?? '');
-        const pv = String(prevCells[key]?.v ?? prevCells[key]?.m ?? '');
-        if (cv !== pv) {
-          const [r, c] = key.split('_').map(Number);
-          changes.push({ key, col: `${colName(c)}${r + 1}`, newVal: cv.slice(0, 100), oldVal: pv.slice(0, 100) });
-        }
+        const cv = String(currCells[key]?.v ?? currCells[key]?.m ?? '').trim();
+        const pv = String(prevCells[key]?.v ?? prevCells[key]?.m ?? '').trim();
+        // Skip if value unchanged or both empty
+        if (cv === pv || (cv === '' && pv === '')) continue;
+        const [r, c] = key.split('_').map(Number);
+        changes.push({ key, col: `${colName(c)}${r + 1}`, newVal: cv.slice(0, 100), oldVal: pv.slice(0, 100) });
       }
     }
     return changes.slice(0, 200);
@@ -359,20 +401,9 @@ export default function SheetPage() {
 
   const saveAll = useCallback((allSheets: any[], summary?: string, changedCells?: CellChange[]) => {
     (allSheets || []).forEach((s, i) => {
-      const rawCells = cellsFromSheet(s);
-      // Strip injected yellow highlights before saving
-      const cells: Record<string, any> = {};
-      for (const [k, v] of Object.entries(rawCells)) {
-        if (v && typeof v === 'object' && v.bg === '#FFF9C4') {
-          const { bg, ...rest } = v;
-          if (Object.keys(rest).length) cells[k] = rest;
-        } else {
-          cells[k] = v;
-        }
-      }
       const data = {
         name: s.name,
-        cells,
+        cells: cellsFromSheet(s),
         columnWidths: s.config?.columnlen || {},
         rowHeights: s.config?.rowlen || {},
         merges: s.config?.merge || {},
@@ -614,33 +645,7 @@ export default function SheetPage() {
         </div>
       )}
 
-      {/* Cell hover tooltip */}
-      {hoveredCell && tooltipPos && (() => {
-        const key = `${activeSheetIdx}_${hoveredCell.r}_${hoveredCell.c}`;
-        const change = cellHighlights[key];
-        const color = change ? (userColors[change.username] ?? '#94a3b8') : '#94a3b8';
-        const label = change ? change.username : null;
-        return (
-          <div
-            style={{
-              position: 'fixed',
-              left: tooltipPos.x + 14,
-              top: tooltipPos.y - 32,
-              background: color + '33',
-              border: `1.5px solid ${color}`,
-              borderRadius: 6,
-              padding: '2px 8px',
-              fontSize: 11,
-              color: '#1e293b',
-              pointerEvents: 'none',
-              zIndex: 9999,
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {label ? `✏️ ${label}` : <span style={{ color: '#94a3b8' }}>Не изменялась</span>}
-          </div>
-        );
-      })()}
+      {/* Cell hover overlay — absolutely positioned over the exact cell */}
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
@@ -650,6 +655,43 @@ export default function SheetPage() {
           onMouseMove={handleWorkbookMouseMove}
           onMouseLeave={handleWorkbookMouseLeave}
         >
+          {/* Absolute overlay over the hovered cell */}
+          {hoverOverlay && (
+            <div
+              style={{
+                position: 'absolute',
+                left: hoverOverlay.left,
+                top: hoverOverlay.top,
+                width: hoverOverlay.width,
+                height: hoverOverlay.height,
+                background: hoverOverlay.color + '33',  // ~20% opacity
+                border: `1px solid ${hoverOverlay.color}55`,
+                pointerEvents: 'none',
+                zIndex: 50,
+                display: 'flex',
+                alignItems: 'flex-end',
+                overflow: 'hidden',
+                boxSizing: 'border-box',
+              }}
+            >
+              {hoverOverlay.username && (
+                <span style={{
+                  fontSize: 9,
+                  lineHeight: '10px',
+                  color: hoverOverlay.color,
+                  padding: '0 2px 1px',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  maxWidth: '100%',
+                  fontWeight: 600,
+                }}>
+                  {hoverOverlay.username}
+                </span>
+              )}
+            </div>
+          )}
+
           <Workbook
             key={workbookKey}
             ref={workbookRef}
