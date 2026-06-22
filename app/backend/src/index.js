@@ -119,15 +119,14 @@ io.on('connection', (socket) => {
 const BACKUP_DIR = process.env.BACKUP_DIR || './backups';
 mkdirSync(BACKUP_DIR, { recursive: true });
 
+// Weekly auto-backup of ALL tables every Sunday at 2am
 cron.schedule('0 2 * * 0', async () => {
   try {
-    const { rows: sheets } = await query(
-      'SELECT * FROM spreadsheets WHERE backup_enabled = TRUE'
-    );
+    const { rows: sheets } = await query('SELECT * FROM spreadsheets');
     if (!sheets.length) return;
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `auto-backup-${timestamp}.zip`;
+    const filename = `weekly-backup-${timestamp}.zip`;
     const filepath = join(BACKUP_DIR, filename);
     const output = createWriteStream(filepath);
     const archive = archiver('zip');
@@ -145,8 +144,8 @@ cron.schedule('0 2 * * 0', async () => {
     await archive.finalize();
     output.on('close', async () => {
       await query(
-        'INSERT INTO backups (filename, size_bytes) VALUES ($1, $2)',
-        [filename, archive.pointer()]
+        'INSERT INTO backups (filename, size_bytes, backup_type) VALUES ($1, $2, $3)',
+        [filename, archive.pointer(), 'weekly']
       );
     });
   } catch (err) {

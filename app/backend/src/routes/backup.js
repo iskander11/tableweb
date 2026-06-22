@@ -41,8 +41,44 @@ router.post('/all', authenticate, requireAdmin, async (req, res) => {
     output.on('close', async () => {
       const size = archive.pointer();
       await query(
-        'INSERT INTO backups (filename, created_by, size_bytes) VALUES ($1, $2, $3)',
-        [filename, req.user.id, size]
+        'INSERT INTO backups (filename, created_by, size_bytes, backup_type) VALUES ($1, $2, $3, $4)',
+        [filename, req.user.id, size, 'manual']
+      );
+      res.json({ success: true, filename, size });
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Daily backup of a single spreadsheet
+router.post('/sheet/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { rows: [sheet] } = await query('SELECT * FROM spreadsheets WHERE id = $1', [req.params.id]);
+    if (!sheet) return res.status(404).json({ error: 'Таблица не найдена' });
+
+    const { rows: dataRows } = await query(
+      'SELECT data FROM spreadsheet_data WHERE spreadsheet_id = $1 ORDER BY sheet_index',
+      [req.params.id]
+    );
+    const buffer = await exportExcel(dataRows.map((r) => r.data));
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeName = sheet.name.replace(/[/\\?%*:|"<>]/g, '_');
+    const filename = `daily-${safeName}-${timestamp}.zip`;
+    const filepath = join(BACKUP_DIR, filename);
+
+    const output = createWriteStream(filepath);
+    const archive = archiver('zip');
+    archive.pipe(output);
+    archive.append(Buffer.from(buffer), { name: `${sheet.name}.xlsx` });
+    await archive.finalize();
+
+    output.on('close', async () => {
+      const size = archive.pointer();
+      await query(
+        'INSERT INTO backups (spreadsheet_id, filename, created_by, size_bytes, backup_type, sheet_name) VALUES ($1,$2,$3,$4,$5,$6)',
+        [sheet.id, filename, req.user.id, size, 'daily', sheet.name]
       );
       res.json({ success: true, filename, size });
     });

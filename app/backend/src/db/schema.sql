@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS backups (
   filename VARCHAR(255) NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   created_by UUID REFERENCES users(id),
-  size_bytes BIGINT
+  size_bytes BIGINT,
+  backup_type VARCHAR(20) DEFAULT 'manual',   -- 'weekly' | 'daily' | 'manual'
+  sheet_name VARCHAR(255)                      -- filled for single-table backups
 );
 
 -- Custom fonts uploaded by admins (for faithful Excel rendering + toolbar picker)

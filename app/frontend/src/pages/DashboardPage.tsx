@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Pencil, Trash2, Lock, Archive, ChevronLeft, ChevronRight, KeyRound, X } from 'lucide-react';
+import { Plus, Pencil, Trash2, Lock, Archive, ChevronLeft, ChevronRight, KeyRound, X, CheckCircle } from 'lucide-react';
 import api from '../api/client';
 import { useAuth } from '../store/auth';
 
@@ -130,9 +130,14 @@ export default function DashboardPage() {
     onError: (e: any) => alert(e.response?.data?.error || 'Не удалось переименовать'),
   });
 
-  const toggleBackup = useMutation({
-    mutationFn: (id: string) => api.patch(`/spreadsheets/${id}/backup-toggle`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['sheets'] }),
+  const [dailyBackupDone, setDailyBackupDone] = useState<string | null>(null);
+  const dailyBackup = useMutation({
+    mutationFn: (id: string) => api.post(`/backup/sheet/${id}`),
+    onSuccess: (_data, id) => {
+      setDailyBackupDone(id);
+      setTimeout(() => setDailyBackupDone(null), 3000);
+    },
+    onError: (e: any) => alert(e.response?.data?.error || 'Не удалось создать бэкап'),
   });
 
   const submitCreate = () => {
@@ -242,11 +247,14 @@ export default function DashboardPage() {
               </div>
               <div className="flex items-center gap-1.5 shrink-0 ml-2">
                 <button
-                  onClick={() => toggleBackup.mutate(sheet.id)}
-                  className={`p-1.5 rounded transition ${sheet.backup_enabled ? 'text-green-600 bg-green-50 hover:bg-green-100' : 'text-gray-400 hover:bg-gray-100'}`}
-                  title={sheet.backup_enabled ? 'Автобэкап включён (нажмите чтобы выключить)' : 'Включить автобэкап'}
+                  onClick={() => dailyBackup.mutate(sheet.id)}
+                  disabled={dailyBackup.isPending && dailyBackup.variables === sheet.id}
+                  className="p-1.5 rounded transition text-gray-400 hover:bg-amber-50 hover:text-amber-600"
+                  title="Создать дневной бэкап этой таблицы"
                 >
-                  <Archive size={15} />
+                  {dailyBackupDone === sheet.id
+                    ? <CheckCircle size={15} className="text-green-500" />
+                    : <Archive size={15} />}
                 </button>
                 <button
                   onClick={() => { setRenameId(sheet.id); setRenameName(sheet.name); }}

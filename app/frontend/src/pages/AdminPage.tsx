@@ -7,7 +7,10 @@ import { useAuth } from '../store/auth';
 
 interface User { id: string; username: string; email: string; role: string; is_active: boolean }
 interface FontItem { id: string; displayName: string; familyName: string; format: string; url: string }
-interface BackupItem { id: string; filename: string; created_at: string; size_bytes: number; username: string }
+interface BackupItem {
+  id: string; filename: string; created_at: string; size_bytes: number;
+  username: string; backup_type: string; sheet_name: string | null;
+}
 
 function formatBytes(n: number) {
   if (!n) return '0 Б';
@@ -353,8 +356,22 @@ export default function AdminPage() {
             {backups.map((b) => (
               <div key={b.id} className="flex items-center justify-between py-2 border-b last:border-0">
                 <div className="min-w-0">
-                  <div className="font-medium text-gray-800 truncate">{b.filename}</div>
-                  <div className="text-xs text-gray-400">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded shrink-0 ${
+                      b.backup_type === 'weekly' ? 'bg-blue-100 text-blue-700' :
+                      b.backup_type === 'daily'  ? 'bg-amber-100 text-amber-700' :
+                                                   'bg-gray-100 text-gray-600'
+                    }`}>
+                      {b.backup_type === 'weekly' ? 'Недельный' : b.backup_type === 'daily' ? 'Дневной' : 'Ручной'}
+                    </span>
+                    {b.sheet_name && (
+                      <span className="text-sm font-medium text-gray-800 truncate">{b.sheet_name}</span>
+                    )}
+                    {!b.sheet_name && (
+                      <span className="text-sm font-medium text-gray-800">Все таблицы</span>
+                    )}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-0.5">
                     {new Date(b.created_at).toLocaleString('ru-RU')} · {formatBytes(b.size_bytes)}
                     {b.username ? ` · ${b.username}` : ''}
                   </div>
