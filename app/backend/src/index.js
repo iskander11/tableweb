@@ -77,7 +77,7 @@ io.on('connection', (socket) => {
     socket.to(sheetId).emit('cell-change', { userId: socket.user.id, changes });
   });
 
-  socket.on('save-sheet', async ({ sheetId, sheetIndex, data, summary }) => {
+  socket.on('save-sheet', async ({ sheetId, sheetIndex, data, summary, changedCells }) => {
     try {
       await query(
         `INSERT INTO spreadsheet_data (spreadsheet_id, sheet_index, data)
@@ -87,16 +87,19 @@ io.on('connection', (socket) => {
       );
       await query('UPDATE spreadsheets SET updated_at = NOW() WHERE id = $1', [sheetId]);
       await query(
-        `INSERT INTO change_log (spreadsheet_id, sheet_index, user_id, username, summary)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [sheetId, sheetIndex, socket.user.id, socket.user.username, summary || null]
+        `INSERT INTO change_log (spreadsheet_id, sheet_index, user_id, username, summary, changed_cells)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [sheetId, sheetIndex, socket.user.id, socket.user.username, summary || null,
+         changedCells ? JSON.stringify(changedCells) : null]
       );
-      io.to(sheetId).emit('changelog-update', {
+      const entry = {
         username: socket.user.username,
         sheet_index: sheetIndex,
         summary: summary || null,
+        changed_cells: changedCells || null,
         saved_at: new Date().toISOString(),
-      });
+      };
+      io.to(sheetId).emit('changelog-update', entry);
     } catch (err) {
       socket.emit('error', err.message);
     }

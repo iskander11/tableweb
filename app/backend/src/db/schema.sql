@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS change_log (
   user_id UUID NOT NULL REFERENCES users(id),
   username VARCHAR(50) NOT NULL,
   saved_at TIMESTAMPTZ DEFAULT NOW(),
-  summary TEXT
+  summary TEXT,
+  changed_cells JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_change_log_sheet ON change_log(spreadsheet_id, saved_at DESC);
 

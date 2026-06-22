@@ -17,26 +17,51 @@ interface ImportState {
   error: string | null;
 }
 
+interface CellChange {
+  key: string;      // "r_c"
+  col: string;      // "A1"
+  newVal: string;
+  oldVal: string;
+}
+
 interface ChangeEntry {
   username: string;
   sheet_index: number;
   summary: string | null;
+  changed_cells: CellChange[] | null;
   saved_at: string;
 }
 
-function buildSheets(sheetMeta: any) {
+// Map of "sheetIndex_r_c" → latest change info for cell highlighting
+type CellHighlightMap = Record<string, { username: string; saved_at: string; newVal: string }>;
+
+function buildSheets(sheetMeta: any, highlights: CellHighlightMap = {}) {
   return (sheetMeta.sheets || []).map((s: any, i: number) => {
     const data = s.data || {};
+    const baseCells = flattenCells(data.cells || {});
+
+    // Inject yellow background + note into recently changed cells
+    const celldata = baseCells.map((cell: any) => {
+      const hKey = `${i}_${cell.r}_${cell.c}`;
+      const h = highlights[hKey];
+      if (!h) return cell;
+      const v = { ...(cell.v || {}) };
+      if (!v.bg) v.bg = '#FFF9C4';   // light yellow — only if no custom bg
+      return { ...cell, v };
+    });
+
     const sheet: any = {
       name: data.name || `Sheet${i + 1}`,
       index: i,
       status: 1,
-      celldata: flattenCells(data.cells || {}),
+      celldata,
       config: {
         columnlen: numericKeys(data.columnWidths || {}),
         rowlen: numericKeys(data.rowHeights || {}),
         merge: data.merges || {},
         borderInfo: data.borderInfo || [],
+        colhidden: data.colhidden || {},
+        rowhidden: data.rowhidden || {},
       },
     };
 
@@ -86,6 +111,8 @@ export default function SheetPage() {
   const [isDirty, setIsDirty] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
+  const [cellHighlights, setCellHighlights] = useState<CellHighlightMap>({});
+  const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
   const lastSavedSheetsRef = useRef<any[] | null>(null);
@@ -115,18 +142,42 @@ export default function SheetPage() {
 
   useEffect(() => {
     if (!sheetMeta) return;
-    const built = buildSheets(sheetMeta);
-    const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
-    setSheets(data);
-    lastSavedSheetsRef.current = data;
+    sheetMetaRef.current = sheetMeta;
+    // Load changelog to build cell highlights, then build sheets
+    api.get(`/spreadsheets/${id}/changelog`).then((r) => {
+      const entries: ChangeEntry[] = r.data;
+      setChangelog(entries);
+      const map: CellHighlightMap = {};
+      // Process oldest→newest so newest wins
+      for (const entry of [...entries].reverse()) {
+        if (!entry.changed_cells) continue;
+        for (const cc of entry.changed_cells) {
+          map[`${entry.sheet_index}_${cc.key}`] = {
+            username: entry.username,
+            saved_at: entry.saved_at,
+            newVal: cc.newVal,
+          };
+        }
+      }
+      setCellHighlights(map);
+      const built = buildSheets(sheetMeta, map);
+      const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
+      setSheets(data);
+      lastSavedSheetsRef.current = data;
+    }).catch(() => {
+      // Changelog unavailable — still load sheet normally
+      const built = buildSheets(sheetMeta, {});
+      const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
+      setSheets(data);
+      lastSavedSheetsRef.current = data;
+    });
     acceptChangesRef.current = false;
     baselineTakenRef.current = false;
     setIsDirty(false);
-    // Allow ~800ms for FortuneSheet to finish its own init onChange calls
     setTimeout(() => { acceptChangesRef.current = true; }, 800);
-  }, [sheetMeta]);
+  }, [sheetMeta, id]);
 
-  // Load changelog when panel opens
+  // Reload changelog when panel opens (to get latest)
   useEffect(() => {
     if (!showHistory || !id) return;
     api.get(`/spreadsheets/${id}/changelog`).then((r) => setChangelog(r.data));
@@ -143,9 +194,44 @@ export default function SheetPage() {
     });
     socket.on('changelog-update', (entry: ChangeEntry) => {
       setChangelog((prev) => [entry, ...prev].slice(0, 100));
+      // Update cell highlights for cells changed by others
+      if (entry.changed_cells) {
+        setCellHighlights((prev) => {
+          const next = { ...prev };
+          for (const cc of entry.changed_cells!) {
+            next[`${entry.sheet_index}_${cc.key}`] = {
+              username: entry.username,
+              saved_at: entry.saved_at,
+              newVal: cc.newVal,
+            };
+          }
+          return next;
+        });
+      }
     });
     return () => { socket.disconnect(); };
   }, [id, token]);
+
+  const computeChangedCells = useCallback((current: any[], prev: any[] | null): CellChange[] => {
+    if (!prev) return [];
+    const changes: CellChange[] = [];
+    for (const sheet of current) {
+      const si = sheet.index ?? 0;
+      const prevSheet = prev.find((s: any) => (s.index ?? 0) === si);
+      const currCells = cellsFromSheet(sheet);
+      const prevCells = prevSheet ? cellsFromSheet(prevSheet) : {};
+      const allKeys = new Set([...Object.keys(currCells), ...Object.keys(prevCells)]);
+      for (const key of allKeys) {
+        const cv = String(currCells[key]?.v ?? currCells[key]?.m ?? '');
+        const pv = String(prevCells[key]?.v ?? prevCells[key]?.m ?? '');
+        if (cv !== pv) {
+          const [r, c] = key.split('_').map(Number);
+          changes.push({ key, col: `${colName(c)}${r + 1}`, newVal: cv.slice(0, 100), oldVal: pv.slice(0, 100) });
+        }
+      }
+    }
+    return changes.slice(0, 200);
+  }, []);
 
   const buildSummary = useCallback((current: any[]): string => {
     const prev = lastSavedSheetsRef.current;
@@ -175,11 +261,22 @@ export default function SheetPage() {
     return `Изменено ячеек: ${changedCount}${examples.length ? ` (${examples.join(', ')})` : ''}`;
   }, []);
 
-  const saveAll = useCallback((allSheets: any[], summary?: string) => {
+  const saveAll = useCallback((allSheets: any[], summary?: string, changedCells?: CellChange[]) => {
     (allSheets || []).forEach((s, i) => {
+      const rawCells = cellsFromSheet(s);
+      // Strip injected yellow highlights before saving
+      const cells: Record<string, any> = {};
+      for (const [k, v] of Object.entries(rawCells)) {
+        if (v && typeof v === 'object' && v.bg === '#FFF9C4') {
+          const { bg, ...rest } = v;
+          if (Object.keys(rest).length) cells[k] = rest;
+        } else {
+          cells[k] = v;
+        }
+      }
       const data = {
         name: s.name,
-        cells: cellsFromSheet(s),
+        cells,
         columnWidths: s.config?.columnlen || {},
         rowHeights: s.config?.rowlen || {},
         merges: s.config?.merge || {},
@@ -187,12 +284,15 @@ export default function SheetPage() {
         filterSelect: s.filter_select || null,
         filterCriteria: s.filter || null,
         frozen: s.frozen || null,
+        colhidden: s.config?.colhidden || {},
+        rowhidden: s.config?.rowhidden || {},
       };
       socketRef.current?.emit('save-sheet', {
         sheetId: id,
         sheetIndex: s.index ?? i,
         data,
         summary: summary || null,
+        changedCells: changedCells || null,
       });
     });
   }, [id]);
@@ -200,8 +300,9 @@ export default function SheetPage() {
   const handleSaveNow = useCallback(() => {
     const all = latestSheetsRef.current || sheets;
     const summary = buildSummary(all);
+    const changedCells = computeChangedCells(all, lastSavedSheetsRef.current);
     setSaveState('saving');
-    saveAll(all, summary);
+    saveAll(all, summary, changedCells);
     lastSavedSheetsRef.current = all;
     setIsDirty(false);
     setSaveState('saved');
@@ -479,6 +580,22 @@ export default function SheetPage() {
                         </div>
                         {e.summary && (
                           <p className="text-xs text-gray-600 mt-1 ml-7 break-words">{e.summary}</p>
+                        )}
+                        {e.changed_cells && e.changed_cells.length > 0 && (
+                          <div className="ml-7 mt-1.5 space-y-0.5">
+                            {e.changed_cells.slice(0, 8).map((cc, ci) => (
+                              <div key={ci} className="flex items-start gap-1 text-xs">
+                                <span className="font-mono font-semibold text-blue-600 shrink-0">{cc.col}</span>
+                                <span className="text-gray-400 shrink-0">→</span>
+                                <span className="text-gray-700 break-all">
+                                  {cc.newVal ? `"${cc.newVal.slice(0, 40)}"` : <span className="italic text-gray-400">удалено</span>}
+                                </span>
+                              </div>
+                            ))}
+                            {e.changed_cells.length > 8 && (
+                              <p className="text-xs text-gray-400">ещё {e.changed_cells.length - 8} ячеек…</p>
+                            )}
+                          </div>
                         )}
                         <p className="text-xs text-gray-400 mt-0.5 ml-7">{formatTime(e.saved_at)}</p>
                       </li>

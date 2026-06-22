@@ -14,10 +14,14 @@ router.get('/', authenticate, async (req, res) => {
          JOIN users u ON s.created_by = u.id ORDER BY s.created_at DESC`
       ));
     } else {
+      // LEFT JOIN — show all tables; if no specific permission, default to 'reader'
       ({ rows } = await query(
-        `SELECT s.*, u.username as creator_name, sp.role as my_role FROM spreadsheets s
+        `SELECT s.*, u.username as creator_name,
+                COALESCE(sp.role, 'reader') as my_role
+         FROM spreadsheets s
          JOIN users u ON s.created_by = u.id
-         JOIN spreadsheet_permissions sp ON sp.spreadsheet_id = s.id AND sp.user_id = $1
+         LEFT JOIN spreadsheet_permissions sp
+               ON sp.spreadsheet_id = s.id AND sp.user_id = $1
          ORDER BY s.created_at DESC`,
         [req.user.id]
       ));
@@ -61,16 +65,7 @@ router.get('/:id', authenticate, async (req, res) => {
     );
     if (!sheet) return res.status(404).json({ error: 'Not found' });
 
-    const canAccess = req.user.role === 'admin' ||
-      sheet.created_by === req.user.id;
-
-    if (!canAccess) {
-      const { rows } = await query(
-        'SELECT role FROM spreadsheet_permissions WHERE spreadsheet_id = $1 AND user_id = $2',
-        [req.params.id, req.user.id]
-      );
-      if (!rows.length) return res.status(403).json({ error: 'No access' });
-    }
+    // All authenticated users can access tables (role controls edit rights, not visibility)
 
     const { rows: dataRows } = await query(
       'SELECT * FROM spreadsheet_data WHERE spreadsheet_id = $1 ORDER BY sheet_index',
@@ -163,7 +158,7 @@ router.patch('/:id/lock', authenticate, requireAdmin, async (req, res) => {
 router.get('/:id/changelog', authenticate, async (req, res) => {
   try {
     const { rows } = await query(
-      `SELECT username, sheet_index, summary, saved_at
+      `SELECT username, sheet_index, summary, changed_cells, saved_at
        FROM change_log WHERE spreadsheet_id = $1
        ORDER BY saved_at DESC LIMIT 100`,
       [req.params.id]
