@@ -107,7 +107,7 @@ function formatTime(iso: string) {
 export default function SheetPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { token, user, isAdmin } = useAuth();
+  const { token, isEditor } = useAuth();
   const qc = useQueryClient();
   const socketRef = useRef<Socket | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
@@ -172,7 +172,6 @@ export default function SheetPage() {
   const baselineTakenRef = useRef(false);
   const { version: fontsVersion } = useFonts();
 
-  // Table metadata (carries created_by, which drives ownership-based edit rights).
   const { data: sheetMeta, isError: sheetError } = useQuery({
     queryKey: ['sheet', id],
     queryFn: () => api.get(`/spreadsheets/${id}`).then((r) => r.data),
@@ -181,12 +180,9 @@ export default function SheetPage() {
     gcTime: 0,
   });
 
-  // Edit rights mirror the backend role model: admins edit anything, editors only
-  // their own tables, readers never. Stays read-only until metadata has loaded.
-  const editor = !!user && (
-    isAdmin() ||
-    (user.role === 'editor' && !!sheetMeta && sheetMeta.created_by === user.id)
-  );
+  // The workbook is a shared corporate base: any editor/admin can edit any table.
+  // (Delete/backup remain ownership-scoped, enforced on the dashboard + backend.)
+  const editor = isEditor();
 
   useEffect(() => { userColorsRef.current = userColors; }, [userColors]);
   useEffect(() => { onlineUsersRef.current = onlineUsers; }, [onlineUsers]);

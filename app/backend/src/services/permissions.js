@@ -1,13 +1,24 @@
 import { query } from '../db/index.js';
 
-// Single source of truth for the role model:
-//   - admin  → full rights on every table (edit / rename / delete / backup)
-//   - editor → full rights ONLY on tables they created (their own tables)
-//   - reader → no rights at all: can list and open tables read-only, nothing else
+// Single source of truth for the role model. Two distinct rights:
 //
-// Editing and managing (delete/backup/rename) follow the same rule here, so both
-// resolve through canManageSheet. Per-table grants are intentionally ignored —
-// the model is purely role + ownership.
+// EDIT (change cell data / import): the workbook is a shared corporate base.
+//   - admin  → any table
+//   - editor → any table
+//   - reader → never
+//
+// MANAGE (delete / backup / rename): scoped to ownership.
+//   - admin  → any table
+//   - editor → only tables they created (their own)
+//   - reader → never
+
+// Edit rights: editors and admins can edit every table; readers never.
+export function canEditSheet(user) {
+  return !!user && (user.role === 'admin' || user.role === 'editor');
+}
+
+// Manage rights (delete / backup / rename): admins anywhere, editors only on
+// tables they own, readers never.
 export async function canManageSheet(user, spreadsheetId) {
   if (!user) return false;
   if (user.role === 'admin') return true;
@@ -20,9 +31,6 @@ export async function canManageSheet(user, spreadsheetId) {
   if (!sheet) return false;
   return sheet.created_by === user.id;
 }
-
-// Edit rights are identical to manage rights under this model.
-export const canEditSheet = canManageSheet;
 
 // Who is allowed to create new tables: editors and admins (not readers).
 export function canCreateSheet(user) {

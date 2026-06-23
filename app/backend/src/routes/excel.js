@@ -47,8 +47,8 @@ router.get('/:id/import-progress', authenticate, (req, res) => {
 router.post('/:id/import', authenticate, upload.single('file'), async (req, res) => {
   const { jobId } = req.query;
 
-  // Import overwrites the whole table — only users who may edit it are allowed.
-  if (!(await canEditSheet(req.user, req.params.id))) {
+  // Import overwrites table data — an edit action, allowed for editors/admins.
+  if (!canEditSheet(req.user)) {
     return res.status(403).json({ error: 'Нет прав на изменение этой таблицы' });
   }
 

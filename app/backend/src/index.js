@@ -77,9 +77,9 @@ io.on('connection', (socket) => {
     io.to(sheetId).emit('room-users', Object.values(roomUsers[sheetId]));
   });
 
-  socket.on('cell-change', async ({ sheetId, changes }) => {
-    // Only users who may edit this table get to broadcast live edits to others.
-    if (!(await canEditSheet(socket.user, sheetId))) return;
+  socket.on('cell-change', ({ sheetId, changes }) => {
+    // Only editors/admins may broadcast live edits to others.
+    if (!canEditSheet(socket.user)) return;
     socket.to(sheetId).emit('cell-change', { userId: socket.user.id, changes });
   });
 
@@ -96,9 +96,9 @@ io.on('connection', (socket) => {
 
   socket.on('save-sheet', async ({ sheetId, sheetIndex, data, logChange }) => {
     try {
-      // Enforce the role model server-side: readers (and editors on tables they
-      // don't own) must never be able to persist changes, even via a crafted emit.
-      if (!(await canEditSheet(socket.user, sheetId))) {
+      // Enforce the role model server-side: readers must never persist changes,
+      // even via a crafted emit. Editors/admins may edit any table.
+      if (!canEditSheet(socket.user)) {
         socket.emit('error', 'Нет прав на редактирование этой таблицы');
         return;
       }
