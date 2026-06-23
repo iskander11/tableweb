@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { query } from '../db/index.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
+import { canManageSheet, canCreateSheet } from '../services/permissions.js';
 
 const router = Router();
 
@@ -34,6 +35,9 @@ router.get('/', authenticate, async (req, res) => {
 
 // Create spreadsheet
 router.post('/', authenticate, async (req, res) => {
+  if (!canCreateSheet(req.user)) {
+    return res.status(403).json({ error: 'Недостаточно прав для создания таблиц' });
+  }
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Введите название таблицы' });
   try {
@@ -90,7 +94,7 @@ router.patch('/:id/rename', authenticate, async (req, res) => {
   if (!name) return res.status(400).json({ error: 'Введите название таблицы' });
   const { rows: [sheet] } = await query('SELECT * FROM spreadsheets WHERE id = $1', [req.params.id]);
   if (!sheet) return res.status(404).json({ error: 'Not found' });
-  if (sheet.created_by !== req.user.id && req.user.role !== 'admin')
+  if (!(await canManageSheet(req.user, req.params.id)))
     return res.status(403).json({ error: 'Forbidden' });
 
   const dup = await query(
@@ -109,7 +113,7 @@ router.patch('/:id/rename', authenticate, async (req, res) => {
 router.delete('/:id', authenticate, async (req, res) => {
   const { rows: [sheet] } = await query('SELECT * FROM spreadsheets WHERE id = $1', [req.params.id]);
   if (!sheet) return res.status(404).json({ error: 'Not found' });
-  if (sheet.created_by !== req.user.id && req.user.role !== 'admin')
+  if (!(await canManageSheet(req.user, req.params.id)))
     return res.status(403).json({ error: 'Forbidden' });
 
   await query('DELETE FROM spreadsheets WHERE id = $1', [req.params.id]);
@@ -172,7 +176,8 @@ router.get('/:id/changelog', authenticate, async (req, res) => {
 // Toggle backup
 router.patch('/:id/backup-toggle', authenticate, async (req, res) => {
   const { rows: [sheet] } = await query('SELECT * FROM spreadsheets WHERE id = $1', [req.params.id]);
-  if (sheet.created_by !== req.user.id && req.user.role !== 'admin')
+  if (!sheet) return res.status(404).json({ error: 'Not found' });
+  if (!(await canManageSheet(req.user, req.params.id)))
     return res.status(403).json({ error: 'Forbidden' });
 
   await query(

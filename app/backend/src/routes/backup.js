@@ -4,6 +4,7 @@ import AdmZip from 'adm-zip';
 import { exportExcel, importExcel } from '../services/excel.js';
 import { query } from '../db/index.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
+import { canManageSheet } from '../services/permissions.js';
 import { createWriteStream, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
@@ -51,11 +52,14 @@ router.post('/all', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// Daily backup of a single spreadsheet
-router.post('/sheet/:id', authenticate, requireAdmin, async (req, res) => {
+// Daily backup of a single spreadsheet (admins on any table, editors on their own)
+router.post('/sheet/:id', authenticate, async (req, res) => {
   try {
     const { rows: [sheet] } = await query('SELECT * FROM spreadsheets WHERE id = $1', [req.params.id]);
     if (!sheet) return res.status(404).json({ error: 'Таблица не найдена' });
+    if (!(await canManageSheet(req.user, req.params.id))) {
+      return res.status(403).json({ error: 'Нет прав на резервную копию этой таблицы' });
+    }
 
     const { rows: dataRows } = await query(
       'SELECT data FROM spreadsheet_data WHERE spreadsheet_id = $1 ORDER BY sheet_index',

@@ -3,6 +3,7 @@ import multer from 'multer';
 import { importExcel, exportExcel } from '../services/excel.js';
 import pool, { query } from '../db/index.js';
 import { authenticate } from '../middleware/auth.js';
+import { canEditSheet } from '../services/permissions.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -45,6 +46,11 @@ router.get('/:id/import-progress', authenticate, (req, res) => {
 // POST /api/excel/:id/import?jobId=xxx
 router.post('/:id/import', authenticate, upload.single('file'), async (req, res) => {
   const { jobId } = req.query;
+
+  // Import overwrites the whole table — only users who may edit it are allowed.
+  if (!(await canEditSheet(req.user, req.params.id))) {
+    return res.status(403).json({ error: 'Нет прав на изменение этой таблицы' });
+  }
 
   const updateProgress = (pct) => {
     if (!jobId) return;

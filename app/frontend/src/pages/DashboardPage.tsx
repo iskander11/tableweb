@@ -93,6 +93,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 interface Spreadsheet {
   id: string;
   name: string;
+  created_by: string;
   creator_name: string;
   created_at: string;
   is_locked: boolean;
@@ -102,7 +103,13 @@ interface Spreadsheet {
 const PAGE_SIZE = 15;
 
 export default function DashboardPage() {
-  const { user, isAdmin, logout } = useAuth();
+  const { user, isAdmin, isEditor, logout } = useAuth();
+  // Can the current user create tables? Readers cannot.
+  const canCreate = isEditor();
+  // Can the current user manage (rename/delete/backup) a given table?
+  // Admins: any table. Editors: only their own. Readers: none.
+  const canManage = (sheet: Spreadsheet) =>
+    isAdmin() || (user?.role === 'editor' && sheet.created_by === user.id);
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [newName, setNewName] = useState('');
@@ -249,25 +256,29 @@ export default function DashboardPage() {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8">
-        {/* Create row */}
-        <div className="flex items-center gap-3 mb-1">
-          <input
-            value={newName}
-            onChange={(e) => { setNewName(e.target.value); if (createError) setCreateError(''); }}
-            placeholder="Название новой таблицы..."
-            className="border border-gray-300 rounded-lg px-3 py-2 flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            onKeyDown={(e) => e.key === 'Enter' && submitCreate()}
-          />
-          <button
-            onClick={submitCreate}
-            disabled={createMutation.isPending}
-            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition shrink-0"
-          >
-            <Plus size={16} /> <span className="hidden sm:inline">Создать</span>
-          </button>
-        </div>
-        {createError && <p className="text-red-500 text-sm mb-4">{createError}</p>}
-        {!createError && <div className="mb-4" />}
+        {/* Create row — only for users who may create tables (editors & admins) */}
+        {canCreate && (
+          <>
+            <div className="flex items-center gap-3 mb-1">
+              <input
+                value={newName}
+                onChange={(e) => { setNewName(e.target.value); if (createError) setCreateError(''); }}
+                placeholder="Название новой таблицы..."
+                className="border border-gray-300 rounded-lg px-3 py-2 flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onKeyDown={(e) => e.key === 'Enter' && submitCreate()}
+              />
+              <button
+                onClick={submitCreate}
+                disabled={createMutation.isPending}
+                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition shrink-0"
+              >
+                <Plus size={16} /> <span className="hidden sm:inline">Создать</span>
+              </button>
+            </div>
+            {createError && <p className="text-red-500 text-sm mb-4">{createError}</p>}
+            {!createError && <div className="mb-4" />}
+          </>
+        )}
 
         {/* Search — shown only if more than PAGE_SIZE tables */}
         {sheets.length > PAGE_SIZE && (
@@ -307,32 +318,35 @@ export default function DashboardPage() {
                   </div>
                 )}
               </div>
-              <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                <button
-                  onClick={() => dailyBackup.mutate(sheet.id)}
-                  disabled={dailyBackup.isPending && dailyBackup.variables === sheet.id}
-                  className="p-1.5 rounded transition text-gray-400 hover:bg-amber-50 hover:text-amber-600"
-                  title="Создать дневной бэкап этой таблицы"
-                >
-                  {dailyBackupDone === sheet.id
-                    ? <CheckCircle size={15} className="text-green-500" />
-                    : <Archive size={15} />}
-                </button>
-                <button
-                  onClick={() => { setRenameId(sheet.id); setRenameName(sheet.name); }}
-                  className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
-                  title="Переименовать"
-                >
-                  <Pencil size={15} />
-                </button>
-                <button
-                  onClick={() => confirm(`Удалить "${sheet.name}"?`) && deleteMutation.mutate(sheet.id)}
-                  className="p-1.5 rounded hover:bg-red-50 text-red-400"
-                  title="Удалить"
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
+              {/* Manage actions — only on tables the user owns (or any, for admins) */}
+              {canManage(sheet) && (
+                <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                  <button
+                    onClick={() => dailyBackup.mutate(sheet.id)}
+                    disabled={dailyBackup.isPending && dailyBackup.variables === sheet.id}
+                    className="p-1.5 rounded transition text-gray-400 hover:bg-amber-50 hover:text-amber-600"
+                    title="Создать дневной бэкап этой таблицы"
+                  >
+                    {dailyBackupDone === sheet.id
+                      ? <CheckCircle size={15} className="text-green-500" />
+                      : <Archive size={15} />}
+                  </button>
+                  <button
+                    onClick={() => { setRenameId(sheet.id); setRenameName(sheet.name); }}
+                    className="p-1.5 rounded hover:bg-gray-100 text-gray-500"
+                    title="Переименовать"
+                  >
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    onClick={() => confirm(`Удалить "${sheet.name}"?`) && deleteMutation.mutate(sheet.id)}
+                    className="p-1.5 rounded hover:bg-red-50 text-red-400"
+                    title="Удалить"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              )}
             </div>
           ))}
 

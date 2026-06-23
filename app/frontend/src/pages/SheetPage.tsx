@@ -107,7 +107,7 @@ function formatTime(iso: string) {
 export default function SheetPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { token, isEditor } = useAuth();
+  const { token, user, isAdmin } = useAuth();
   const qc = useQueryClient();
   const socketRef = useRef<Socket | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
@@ -172,7 +172,21 @@ export default function SheetPage() {
   const baselineTakenRef = useRef(false);
   const { version: fontsVersion } = useFonts();
 
-  const editor = isEditor();
+  // Table metadata (carries created_by, which drives ownership-based edit rights).
+  const { data: sheetMeta, isError: sheetError } = useQuery({
+    queryKey: ['sheet', id],
+    queryFn: () => api.get(`/spreadsheets/${id}`).then((r) => r.data),
+    retry: false,
+    staleTime: 0,   // always refetch when navigating back to the page
+    gcTime: 0,
+  });
+
+  // Edit rights mirror the backend role model: admins edit anything, editors only
+  // their own tables, readers never. Stays read-only until metadata has loaded.
+  const editor = !!user && (
+    isAdmin() ||
+    (user.role === 'editor' && !!sheetMeta && sheetMeta.created_by === user.id)
+  );
 
   useEffect(() => { userColorsRef.current = userColors; }, [userColors]);
   useEffect(() => { onlineUsersRef.current = onlineUsers; }, [onlineUsers]);
@@ -274,14 +288,6 @@ export default function SheetPage() {
       setTimeout(() => { acceptChangesRef.current = true; }, 800);
     }
   }, [fontsVersion]);
-
-  const { data: sheetMeta, isError: sheetError } = useQuery({
-    queryKey: ['sheet', id],
-    queryFn: () => api.get(`/spreadsheets/${id}`).then((r) => r.data),
-    retry: false,
-    staleTime: 0,   // always refetch when navigating back to the page
-    gcTime: 0,
-  });
 
   useEffect(() => {
     if (!sheetMeta) return;
