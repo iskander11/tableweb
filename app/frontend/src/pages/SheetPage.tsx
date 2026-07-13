@@ -726,6 +726,7 @@ export default function SheetPage() {
       const wrap = workbookWrapperRef.current;
       const canvas = wrap?.querySelector('canvas.fortune-sheet-canvas') as HTMLCanvasElement | null;
       viewportClipRef.current = wrap && canvas ? getMainViewportInCanvas(wrap, canvas) : null;
+      return true;
     },
     afterActivateSheet: (sheetId: string) => {
       const idx = sheetIndexFromId(sheetId);
