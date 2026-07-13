@@ -146,16 +146,15 @@ export default function SheetPage() {
   useEffect(() => { activeSheetIdxRef.current = activeSheetIdx; }, [activeSheetIdx]);
   // True when the active sheet has any edited cells → gates per-frame overlay re-renders
   const hasOverlaysRef = useRef(false);
-  // Last-known rect per edited cell, for smooth fade-out when it scrolls out of view
-  const overlaySeenRef = useRef<Map<string, { left: number; top: number; w: number; h: number; t: number }>>(new Map());
+  // Hide edited-cell overlays while the sheet is scrolling — avoids one-frame desync vs canvas redraw
+  const [isScrolling, setIsScrolling] = useState(false);
+  const scrollEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Cell key the cursor is currently over → skip redundant hover state updates
   const lastHoverKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const prefix = `${activeSheetIdx}_`;
     hasOverlaysRef.current = Object.keys(cellHighlights).some((k) => k.startsWith(prefix));
   }, [cellHighlights, activeSheetIdx]);
-  // Drop cached overlay positions when switching sheets (avoid ghosts from the previous sheet)
-  useEffect(() => { overlaySeenRef.current = new Map(); }, [activeSheetIdx]);
   const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
@@ -650,6 +649,26 @@ export default function SheetPage() {
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Suppress edited-cell overlays during scroll; canvas redraw (afterRenderCell) can lag one frame
+  // behind the scrollbar, and keeping stale absolute positions caused visible "ghost" highlights.
+  useEffect(() => {
+    const wrap = workbookWrapperRef.current;
+    if (!wrap) return;
+
+    const onScroll = () => {
+      setIsScrolling(true);
+      if (scrollEndTimerRef.current) clearTimeout(scrollEndTimerRef.current);
+      scrollEndTimerRef.current = setTimeout(() => setIsScrolling(false), 100);
+    };
+
+    wrap.addEventListener('scroll', onScroll, { passive: true, capture: true });
+
+    return () => {
+      wrap.removeEventListener('scroll', onScroll, { capture: true });
+      if (scrollEndTimerRef.current) clearTimeout(scrollEndTimerRef.current);
+    };
+  }, [workbookKey, activeSheetIdx]);
+
   // Memoize the heavy FortuneSheet element so per-frame overlay re-renders (mapVersion/hover)
   // don't re-render the whole grid. Only rebuilds when its real inputs change.
   const workbookEl = useMemo(() => (
@@ -883,36 +902,30 @@ export default function SheetPage() {
               Re-rendered whenever the cell map changes (mapVersion). */}
           {(() => {
             void mapVersion; // dependency: recompute positions after each redraw
+            if (isScrolling) return null;
             const origin = getCanvasOrigin();
             if (!origin) return null;
             const map = cellRectMapRef.current;
             const prefix = `${activeSheetIdx}_`;
-            const seen = overlaySeenRef.current;
-            const now = Date.now();
-            const FADE_KEEP = 400; // ms to keep an off-screen overlay mounted so it can fade out
 
-            // Refresh last-known positions for currently-visible edited cells
+            const items: React.ReactNode[] = [];
             for (const hKey in cellHighlights) {
               if (!hKey.startsWith(prefix)) continue;
               const rect = map.get(hKey.slice(prefix.length));
-              if (rect) seen.set(hKey, { left: origin.left + rect.x, top: origin.top + rect.y, w: rect.w, h: rect.h, t: now });
-            }
-
-            const items: React.ReactNode[] = [];
-            for (const [hKey, info] of seen) {
-              const onScreen = map.has(hKey.slice(prefix.length)) && hKey.startsWith(prefix);
-              if (!onScreen && now - info.t > FADE_KEEP) { seen.delete(hKey); continue; }
+              if (!rect) continue; // off-screen — don't keep stale absolute positions
               const change = cellHighlights[hKey];
-              if (!change) { seen.delete(hKey); continue; }
+              if (!change) continue;
               const color = userColor(userColors, change.username);
               items.push(
                 <div key={hKey} style={{
-                  position: 'absolute', left: info.left, top: info.top, width: info.w, height: info.h,
+                  position: 'absolute',
+                  left: origin.left + rect.x,
+                  top: origin.top + rect.y,
+                  width: rect.w,
+                  height: rect.h,
                   background: color + '22', border: `1.5px solid ${color}`,
                   boxSizing: 'border-box', overflow: 'hidden',
                   pointerEvents: 'none', zIndex: 49,
-                  opacity: onScreen ? 1 : 0,
-                  transition: 'opacity 0.2s ease',
                 }}>
                   {/* Date/time — inside the cell, top-right */}
                   <span style={{
