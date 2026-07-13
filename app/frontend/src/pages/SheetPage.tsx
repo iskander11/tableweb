@@ -264,7 +264,6 @@ export default function SheetPage() {
   useEffect(() => {
     cellRectMapRef.current = new Map();
     pendingRectMapRef.current = new Map();
-    overlaySeenRef.current = new Map();
     setHoverOverlay(null);
   }, [workbookKey]);
 
