@@ -104,66 +104,64 @@ function formatTime(iso: string) {
   return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
-type PxRect = { x: number; y: number; w: number; h: number };
-type WrapperBox = { left: number; top: number; width: number; height: number };
+// Draw edit markers on the sheet canvas (same layer as cells) so scroll/clipping stay pixel-perfect.
+function drawCellHighlightOnCanvas(
+  ctx: CanvasRenderingContext2D,
+  cellInfo: { startX: number; startY: number; endX: number; endY: number },
+  change: { username: string; saved_at: string },
+  colors: Record<string, string>,
+) {
+  const x = cellInfo.startX;
+  const y = cellInfo.startY;
+  const w = cellInfo.endX - cellInfo.startX;
+  const h = cellInfo.endY - cellInfo.startY;
+  if (w <= 1 || h <= 1) return;
 
-function intersectWrapperBox(cell: WrapperBox, clip: WrapperBox): WrapperBox | null {
-  const x1 = Math.max(cell.left, clip.left);
-  const y1 = Math.max(cell.top, clip.top);
-  const x2 = Math.min(cell.left + cell.width, clip.left + clip.width);
-  const y2 = Math.min(cell.top + cell.height, clip.top + clip.height);
-  const width = x2 - x1;
-  const height = y2 - y1;
-  if (width <= 0.5 || height <= 0.5) return null;
-  return { left: x1, top: y1, width, height };
+  const color = userColor(colors, change.username);
+  const timeStr = formatTime(change.saved_at);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+
+  ctx.globalAlpha = 0.13;
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, w, h);
+
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x + 0.75, y + 0.75, Math.max(0, w - 1.5), Math.max(0, h - 1.5));
+
+  if (h >= 10 && w >= 16) {
+    ctx.font = '8px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    const tw = ctx.measureText(timeStr).width;
+    const labelW = Math.min(tw + 4, w);
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillRect(x + w - labelW, y, labelW, 10);
+    ctx.fillStyle = '#475569';
+    ctx.fillText(timeStr, x + w - labelW + 2, y + 8);
+  }
+
+  if (h >= 12) {
+    ctx.font = '600 9px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillStyle = color;
+    const maxChars = Math.max(0, Math.floor((w - 4) / 5));
+    const name = change.username.length > maxChars && maxChars > 1
+      ? change.username.slice(0, maxChars - 1) + '…'
+      : change.username;
+    ctx.fillText(name, x + 2, y + h - 2);
+  }
+
+  ctx.restore();
 }
 
-// Visible data grid viewport in workbook-wrapper coordinates (matches on-screen cell area).
-function getCellAreaClipInWrapper(wrapper: HTMLElement): WrapperBox | null {
-  const area = wrapper.querySelector('.fortune-cell-area')
-    ?? wrapper.querySelector('.luckysheet-cell-main');
-  if (!area) return null;
-  const wRect = wrapper.getBoundingClientRect();
-  const aRect = area.getBoundingClientRect();
-  if (aRect.width <= 0 || aRect.height <= 0) return null;
-  return {
-    left: aRect.left - wRect.left,
-    top: aRect.top - wRect.top,
-    width: aRect.width,
-    height: aRect.height,
-  };
-}
-
-function cellRectToWrapperBox(
-  rect: PxRect,
-  origin: { left: number; top: number },
-): WrapperBox {
-  return {
-    left: origin.left + rect.x,
-    top: origin.top + rect.y,
-    width: rect.w,
-    height: rect.h,
-  };
-}
-
-// Clip to the on-screen grid viewport so a half-visible cell is only half-highlighted.
-function resolveVisibleCellOverlay(
-  rect: PxRect,
-  origin: { left: number; top: number },
-  clip: WrapperBox | null,
-): WrapperBox | null {
-  const full = cellRectToWrapperBox(rect, origin);
-  if (!clip) return full;
-  return intersectWrapperBox(full, clip);
-}
-
-function toClipLocal(box: WrapperBox, clip: WrapperBox): WrapperBox {
-  return {
-    left: box.left - clip.left,
-    top: box.top - clip.top,
-    width: box.width,
-    height: box.height,
-  };
+function nudgeWorkbookRedraw(wb: any, wrap: HTMLElement | null) {
+  if (!wb?.scroll || !wrap) return;
+  const sby = wrap.querySelector('.luckysheet-scrollbar-y') as HTMLElement | null;
+  const sbx = wrap.querySelector('.luckysheet-scrollbar-x') as HTMLElement | null;
+  if (sby && sbx) wb.scroll({ scrollTop: sby.scrollTop, scrollLeft: sbx.scrollLeft });
 }
 
 export default function SheetPage() {
@@ -181,6 +179,7 @@ export default function SheetPage() {
   const [showHistory, setShowHistory] = useState(false);
   const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
   const [cellHighlights, setCellHighlights] = useState<CellHighlightMap>({});
+  const cellHighlightsRef = useRef<CellHighlightMap>({});
   const [userColors, setUserColors] = useState<Record<string, string>>({});
   // Overlay: absolute rect on the hovered cell + who edited it
   const [hoverOverlay, setHoverOverlay] = useState<{
@@ -188,8 +187,6 @@ export default function SheetPage() {
     color: string; username: string | null;
   } | null>(null);
   const [activeSheetIdx, setActiveSheetIdx] = useState(0);
-  // Bumped whenever the cell-rect map is rebuilt (scroll/zoom/redraw) → re-renders persistent overlays
-  const [mapVersion, setMapVersion] = useState(0);
   // When navigating from history — pulse this resolved absolute rect for 2.5s
   const [navHighlight, setNavHighlight] = useState<{
     left: number; top: number; width: number; height: number; color: string;
@@ -206,14 +203,9 @@ export default function SheetPage() {
   const activeSheetIdxRef = useRef(0);
   // Keep ref in sync so stable hooks can read current sheet index
   useEffect(() => { activeSheetIdxRef.current = activeSheetIdx; }, [activeSheetIdx]);
-  // True when the active sheet has any edited cells → gates per-frame overlay re-renders
-  const hasOverlaysRef = useRef(false);
+  useEffect(() => { cellHighlightsRef.current = cellHighlights; }, [cellHighlights]);
   // Cell key the cursor is currently over → skip redundant hover state updates
   const lastHoverKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    const prefix = `${activeSheetIdx}_`;
-    hasOverlaysRef.current = Object.keys(cellHighlights).some((k) => k.startsWith(prefix));
-  }, [cellHighlights, activeSheetIdx]);
   const sheetMetaRef = useRef<any>(null);
   const workbookRef = useRef<any>(null);
   const latestSheetsRef = useRef<any[] | null>(null);
@@ -484,12 +476,9 @@ export default function SheetPage() {
         const hKey = `${activeSheetIdx}_${row}_${col}`;
         // Edited cells are already decorated permanently → only neutral-gray hover on others
         if (cellHighlights[hKey]) { setHoverOverlay(null); return; }
-        const clip = getCellAreaClipInWrapper(workbookWrapperRef.current!);
-        const box = resolveVisibleCellOverlay(rect, origin, clip);
-        if (!box) { setHoverOverlay(null); return; }
         setHoverOverlay({
-          left: box.left, top: box.top,
-          width: box.width, height: box.height,
+          left: origin.left + rect.x, top: origin.top + rect.y,
+          width: rect.w, height: rect.h,
           color: '#94a3b8', username: null,
         });
         return;
@@ -546,19 +535,23 @@ export default function SheetPage() {
       if (rect && origin) {
         const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
         const color = change ? userColor(userColors, change.username) : '#3B82F6';
-        const wrap = workbookWrapperRef.current;
-        const clip = wrap ? getCellAreaClipInWrapper(wrap) : null;
-        const box = resolveVisibleCellOverlay(rect, origin, clip);
-        if (box) {
-          setNavHighlight({ ...box, color });
-          setTimeout(() => setNavHighlight(null), 2500);
-        }
+        setNavHighlight({
+          left: origin.left + rect.x, top: origin.top + rect.y,
+          width: rect.w, height: rect.h, color,
+        });
+        setTimeout(() => setNavHighlight(null), 2500);
       } else if (tries < 25) {
         setTimeout(tick, 70);
       }
     };
     setTimeout(tick, 150);
-  }, [cellHighlights, userColors, getCanvasOrigin, getCanvas]);
+  }, [cellHighlights, userColors, getCanvasOrigin]);
+
+  // Repaint canvas when highlight metadata arrives/changes (canvas hooks don't trigger React redraw).
+  useEffect(() => {
+    if (!sheets.length) return;
+    nudgeWorkbookRedraw(workbookRef.current, workbookWrapperRef.current);
+  }, [cellHighlights, userColors, sheets.length, activeSheetIdx]);
 
   // Note: change detection (diff + summary) is computed server-side on save.
 
@@ -685,7 +678,7 @@ export default function SheetPage() {
       if (typeof r !== 'number' || typeof c !== 'number') return;
       socketRef.current?.emit('presence', { roomId: id, tabId, r, c });
     },
-    afterRenderCell: (_cell: any, cellInfo: any, _ctx: any) => {
+    afterRenderCell: (_cell: any, cellInfo: any, ctx: CanvasRenderingContext2D) => {
       const r = cellInfo.row as number;
       const c = cellInfo.column as number;
       pendingRectMapRef.current.set(`${r}_${c}`, {
@@ -694,17 +687,18 @@ export default function SheetPage() {
         w: cellInfo.endX - cellInfo.startX,
         h: cellInfo.endY - cellInfo.startY,
       });
-      // Coalesce a whole redraw pass (and continuous scrolling) into ONE update per animation
-      // frame via rAF. A debounce would never commit during continuous scroll; an unthrottled
-      // microtask fires many times per frame and floods React with renders (→ freeze/crash).
+
+      const hKey = `${activeSheetIdxRef.current}_${r}_${c}`;
+      const change = cellHighlightsRef.current[hKey];
+      if (change && ctx) {
+        drawCellHighlightOnCanvas(ctx, cellInfo, change, userColorsRef.current);
+      }
+
       if (renderBatchTimerRef.current === null) {
         renderBatchTimerRef.current = requestAnimationFrame(() => {
           cellRectMapRef.current = pendingRectMapRef.current;
           pendingRectMapRef.current = new Map();
           renderBatchTimerRef.current = null;
-          // Only re-render when there are overlays to reposition (no cost on plain sheets)
-          if (hasOverlaysRef.current) setMapVersion((v) => v + 1);
-          // View changed → drop the stale cursor hover box and force re-detect on next move
           lastHoverKeyRef.current = null;
           setHoverOverlay((h) => (h ? null : h));
         }) as unknown as ReturnType<typeof setTimeout>;
@@ -712,8 +706,7 @@ export default function SheetPage() {
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Memoize the heavy FortuneSheet element so per-frame overlay re-renders (mapVersion/hover)
-  // don't re-render the whole grid. Only rebuilds when its real inputs change.
+  // Memoize the heavy FortuneSheet element so hover overlay re-renders don't rebuild the grid.
   const workbookEl = useMemo(() => (
     <Workbook
       key={workbookKey}
@@ -903,6 +896,8 @@ export default function SheetPage() {
           onMouseDown={() => { setHoverOverlay(null); setNavHighlight(null); }}
           onMouseLeave={handleWorkbookMouseLeave}
         >
+          {workbookEl}
+
           {/* Hover overlay — highlights the cell under the cursor */}
           {hoverOverlay && (
             <div
@@ -940,76 +935,6 @@ export default function SheetPage() {
             </div>
           )}
 
-          {/* Persistent overlays on every edited & currently-visible cell.
-              Web-only decoration (absolutely-positioned divs) — never part of the sheet/export.
-              Re-rendered whenever the cell map changes (mapVersion). */}
-          {(() => {
-            void mapVersion;
-            const origin = getCanvasOrigin();
-            if (!origin) return null;
-            const wrap = workbookWrapperRef.current;
-            if (!wrap) return null;
-            const clip = getCellAreaClipInWrapper(wrap);
-            const map = cellRectMapRef.current;
-            const prefix = `${activeSheetIdx}_`;
-
-            const overlayNodes: React.ReactNode[] = [];
-            for (const hKey in cellHighlights) {
-              if (!hKey.startsWith(prefix)) continue;
-              const rect = map.get(hKey.slice(prefix.length));
-              if (!rect) continue;
-              const change = cellHighlights[hKey];
-              if (!change) continue;
-              const box = resolveVisibleCellOverlay(rect, origin, clip);
-              if (!box) continue;
-              const local = clip ? toClipLocal(box, clip) : box;
-              const color = userColor(userColors, change.username);
-              overlayNodes.push(
-                <div key={hKey} style={{
-                  position: 'absolute',
-                  left: local.left,
-                  top: local.top,
-                  width: local.width,
-                  height: local.height,
-                  background: color + '22', border: `1.5px solid ${color}`,
-                  boxSizing: 'border-box', overflow: 'hidden',
-                  pointerEvents: 'none',
-                }}>
-                  <span style={{
-                    position: 'absolute', top: 0, right: 0,
-                    fontSize: 8, lineHeight: '10px', color: '#475569',
-                    background: '#ffffffE6', borderLeft: '1px solid #e2e8f0',
-                    borderBottom: '1px solid #e2e8f0', borderBottomLeftRadius: 3,
-                    padding: '0 2px', whiteSpace: 'nowrap', maxWidth: '100%',
-                    overflow: 'hidden', textOverflow: 'ellipsis',
-                  }}>{formatTime(change.saved_at)}</span>
-                  <span style={{
-                    position: 'absolute', bottom: 0, left: 0,
-                    fontSize: 9, lineHeight: '10px', color, padding: '0 2px 1px',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                    maxWidth: '100%', fontWeight: 600,
-                  }}>{change.username}</span>
-                </div>
-              );
-            }
-            if (!overlayNodes.length) return null;
-            if (!clip) return overlayNodes;
-            return (
-              <div style={{
-                position: 'absolute',
-                left: clip.left,
-                top: clip.top,
-                width: clip.width,
-                height: clip.height,
-                overflow: 'hidden',
-                pointerEvents: 'none',
-                zIndex: 49,
-              }}>
-                {overlayNodes}
-              </div>
-            );
-          })()}
-
           {/* Navigation highlight — shown 2.5s after clicking a history entry */}
           {navHighlight && (
             <div
@@ -1028,8 +953,6 @@ export default function SheetPage() {
               }}
             />
           )}
-
-          {workbookEl}
         </div>
 
         {/* History sidebar — overlay on mobile, sidebar on desktop */}
