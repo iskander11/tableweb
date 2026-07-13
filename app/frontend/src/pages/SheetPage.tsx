@@ -104,6 +104,64 @@ function formatTime(iso: string) {
   return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+type PxRect = { x: number; y: number; w: number; h: number };
+
+function intersectRect(a: PxRect, b: PxRect): PxRect | null {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.w, b.x + b.w);
+  const y2 = Math.min(a.y + a.h, b.y + b.h);
+  const w = x2 - x1;
+  const h = y2 - y1;
+  if (w <= 0.5 || h <= 0.5) return null;
+  return { x: x1, y: y1, w, h };
+}
+
+// FortuneSheet reports the full cell rect even when only part of it is on screen.
+// Clip overlays to the visible grid viewport(s) so a half-visible cell is half-highlighted.
+function clipRectToGridRegions(rect: PxRect, regions: PxRect[]): PxRect | null {
+  let best: PxRect | null = null;
+  let bestArea = 0;
+  for (const region of regions) {
+    const hit = intersectRect(rect, region);
+    if (!hit) continue;
+    const area = hit.w * hit.h;
+    if (area > bestArea) { best = hit; bestArea = area; }
+  }
+  return best;
+}
+
+function getGridClipRegionsInCanvas(wrapper: HTMLElement, canvas: HTMLCanvasElement): PxRect[] {
+  const cRect = canvas.getBoundingClientRect();
+  const regions: PxRect[] = [];
+  wrapper.querySelectorAll('.luckysheet-cell-main').forEach((node) => {
+    const m = node.getBoundingClientRect();
+    if (m.width <= 0 || m.height <= 0) return;
+    regions.push({
+      x: m.left - cRect.left,
+      y: m.top - cRect.top,
+      w: m.width,
+      h: m.height,
+    });
+  });
+  return regions;
+}
+
+function resolveVisibleCellOverlay(
+  rect: PxRect,
+  origin: { left: number; top: number },
+  clipRegions: PxRect[],
+): { left: number; top: number; width: number; height: number } | null {
+  const clipped = clipRectToGridRegions(rect, clipRegions);
+  if (!clipped) return null;
+  return {
+    left: origin.left + clipped.x,
+    top: origin.top + clipped.y,
+    width: clipped.w,
+    height: clipped.h,
+  };
+}
+
 export default function SheetPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -425,9 +483,12 @@ export default function SheetPage() {
         const hKey = `${activeSheetIdx}_${row}_${col}`;
         // Edited cells are already decorated permanently → only neutral-gray hover on others
         if (cellHighlights[hKey]) { setHoverOverlay(null); return; }
+        const clipRegions = getGridClipRegionsInCanvas(workbookWrapperRef.current!, canvas);
+        const box = resolveVisibleCellOverlay(rect, origin, clipRegions);
+        if (!box) { setHoverOverlay(null); return; }
         setHoverOverlay({
-          left: origin.left + rect.x, top: origin.top + rect.y,
-          width: rect.w,             height: rect.h,
+          left: box.left, top: box.top,
+          width: box.width, height: box.height,
           color: '#94a3b8', username: null,
         });
         return;
@@ -484,17 +545,20 @@ export default function SheetPage() {
       if (rect && origin) {
         const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
         const color = change ? userColor(userColors, change.username) : '#3B82F6';
-        setNavHighlight({
-          left: origin.left + rect.x, top: origin.top + rect.y,
-          width: rect.w, height: rect.h, color,
-        });
-        setTimeout(() => setNavHighlight(null), 2500);
+        const wrap = workbookWrapperRef.current;
+        const canvas = getCanvas();
+        const clipRegions = wrap && canvas ? getGridClipRegionsInCanvas(wrap, canvas) : [];
+        const box = resolveVisibleCellOverlay(rect, origin, clipRegions);
+        if (box) {
+          setNavHighlight({ ...box, color });
+          setTimeout(() => setNavHighlight(null), 2500);
+        }
       } else if (tries < 25) {
         setTimeout(tick, 70);
       }
     };
     setTimeout(tick, 150);
-  }, [cellHighlights, userColors, getCanvasOrigin]);
+  }, [cellHighlights, userColors, getCanvasOrigin, getCanvas]);
 
   // Note: change detection (diff + summary) is computed server-side on save.
 
@@ -904,6 +968,11 @@ export default function SheetPage() {
             if (isScrolling) return null;
             const origin = getCanvasOrigin();
             if (!origin) return null;
+            const canvas = getCanvas();
+            const wrap = workbookWrapperRef.current;
+            if (!canvas || !wrap) return null;
+            const clipRegions = getGridClipRegionsInCanvas(wrap, canvas);
+            if (!clipRegions.length) return null;
             const map = cellRectMapRef.current;
             const prefix = `${activeSheetIdx}_`;
 
@@ -911,17 +980,19 @@ export default function SheetPage() {
             for (const hKey in cellHighlights) {
               if (!hKey.startsWith(prefix)) continue;
               const rect = map.get(hKey.slice(prefix.length));
-              if (!rect) continue; // off-screen — don't keep stale absolute positions
+              if (!rect) continue;
               const change = cellHighlights[hKey];
               if (!change) continue;
+              const box = resolveVisibleCellOverlay(rect, origin, clipRegions);
+              if (!box) continue;
               const color = userColor(userColors, change.username);
               items.push(
                 <div key={hKey} style={{
                   position: 'absolute',
-                  left: origin.left + rect.x,
-                  top: origin.top + rect.y,
-                  width: rect.w,
-                  height: rect.h,
+                  left: box.left,
+                  top: box.top,
+                  width: box.width,
+                  height: box.height,
                   background: color + '22', border: `1.5px solid ${color}`,
                   boxSizing: 'border-box', overflow: 'hidden',
                   pointerEvents: 'none', zIndex: 49,
