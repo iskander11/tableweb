@@ -105,75 +105,64 @@ function formatTime(iso: string) {
 }
 
 type PxRect = { x: number; y: number; w: number; h: number };
+type WrapperBox = { left: number; top: number; width: number; height: number };
 
-function intersectRect(a: PxRect, b: PxRect): PxRect | null {
-  const x1 = Math.max(a.x, b.x);
-  const y1 = Math.max(a.y, b.y);
-  const x2 = Math.min(a.x + a.w, b.x + b.w);
-  const y2 = Math.min(a.y + a.h, b.y + b.h);
-  const w = x2 - x1;
-  const h = y2 - y1;
-  if (w <= 0.5 || h <= 0.5) return null;
-  return { x: x1, y: y1, w, h };
+function intersectWrapperBox(cell: WrapperBox, clip: WrapperBox): WrapperBox | null {
+  const x1 = Math.max(cell.left, clip.left);
+  const y1 = Math.max(cell.top, clip.top);
+  const x2 = Math.min(cell.left + cell.width, clip.left + clip.width);
+  const y2 = Math.min(cell.top + cell.height, clip.top + clip.height);
+  const width = x2 - x1;
+  const height = y2 - y1;
+  if (width <= 0.5 || height <= 0.5) return null;
+  return { left: x1, top: y1, width, height };
 }
 
-// FortuneSheet reports the full cell rect even when only part of it is on screen.
-// Clip overlays to the visible grid viewport(s) so a half-visible cell is half-highlighted.
-function clipRectToGridRegions(rect: PxRect, regions: PxRect[]): PxRect | null {
-  let best: PxRect | null = null;
-  let bestArea = 0;
-  for (const region of regions) {
-    const hit = intersectRect(rect, region);
-    if (!hit) continue;
-    const area = hit.w * hit.h;
-    if (area > bestArea) { best = hit; bestArea = area; }
-  }
-  return best;
+// Visible data grid viewport in workbook-wrapper coordinates (matches on-screen cell area).
+function getCellAreaClipInWrapper(wrapper: HTMLElement): WrapperBox | null {
+  const area = wrapper.querySelector('.fortune-cell-area')
+    ?? wrapper.querySelector('.luckysheet-cell-main');
+  if (!area) return null;
+  const wRect = wrapper.getBoundingClientRect();
+  const aRect = area.getBoundingClientRect();
+  if (aRect.width <= 0 || aRect.height <= 0) return null;
+  return {
+    left: aRect.left - wRect.left,
+    top: aRect.top - wRect.top,
+    width: aRect.width,
+    height: aRect.height,
+  };
 }
 
-function getGridClipRegionsInCanvas(wrapper: HTMLElement, canvas: HTMLCanvasElement): PxRect[] {
-  const cRect = canvas.getBoundingClientRect();
-  const regions: PxRect[] = [];
-  // FortuneSheet React uses .fortune-cell-area (not legacy .luckysheet-cell-main)
-  for (const sel of ['.fortune-cell-area', '.luckysheet-cell-main']) {
-    wrapper.querySelectorAll(sel).forEach((node) => {
-      const m = node.getBoundingClientRect();
-      if (m.width <= 0 || m.height <= 0) return;
-      regions.push({
-        x: m.left - cRect.left,
-        y: m.top - cRect.top,
-        w: m.width,
-        h: m.height,
-      });
-    });
-    if (regions.length) break;
-  }
-  if (regions.length) return regions;
-  // Fallback: canvas data area below/right of row & column headers
-  const rowHeader = wrapper.querySelector('.fortune-row-header');
-  const colHeader = wrapper.querySelector('.fortune-col-header-wrap') ?? wrapper.querySelector('.fortune-col-header');
-  const rh = rowHeader?.getBoundingClientRect();
-  const ch = colHeader?.getBoundingClientRect();
-  const x = rh ? rh.right - cRect.left : 0;
-  const y = ch ? ch.bottom - cRect.top : 0;
-  return [{ x, y, w: Math.max(0, cRect.width - x), h: Math.max(0, cRect.height - y) }];
+function cellRectToWrapperBox(
+  rect: PxRect,
+  origin: { left: number; top: number },
+): WrapperBox {
+  return {
+    left: origin.left + rect.x,
+    top: origin.top + rect.y,
+    width: rect.w,
+    height: rect.h,
+  };
 }
 
+// Clip to the on-screen grid viewport so a half-visible cell is only half-highlighted.
 function resolveVisibleCellOverlay(
   rect: PxRect,
   origin: { left: number; top: number },
-  clipRegions: PxRect[],
-): { left: number; top: number; width: number; height: number } | null {
-  if (!clipRegions.length) {
-    return { left: origin.left + rect.x, top: origin.top + rect.y, width: rect.w, height: rect.h };
-  }
-  const clipped = clipRectToGridRegions(rect, clipRegions);
-  if (!clipped) return null;
+  clip: WrapperBox | null,
+): WrapperBox | null {
+  const full = cellRectToWrapperBox(rect, origin);
+  if (!clip) return full;
+  return intersectWrapperBox(full, clip);
+}
+
+function toClipLocal(box: WrapperBox, clip: WrapperBox): WrapperBox {
   return {
-    left: origin.left + clipped.x,
-    top: origin.top + clipped.y,
-    width: clipped.w,
-    height: clipped.h,
+    left: box.left - clip.left,
+    top: box.top - clip.top,
+    width: box.width,
+    height: box.height,
   };
 }
 
@@ -219,9 +208,6 @@ export default function SheetPage() {
   useEffect(() => { activeSheetIdxRef.current = activeSheetIdx; }, [activeSheetIdx]);
   // True when the active sheet has any edited cells → gates per-frame overlay re-renders
   const hasOverlaysRef = useRef(false);
-  // Hide edited-cell overlays while the sheet is scrolling — avoids one-frame desync vs canvas redraw
-  const [isScrolling, setIsScrolling] = useState(false);
-  const scrollEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Cell key the cursor is currently over → skip redundant hover state updates
   const lastHoverKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -498,8 +484,8 @@ export default function SheetPage() {
         const hKey = `${activeSheetIdx}_${row}_${col}`;
         // Edited cells are already decorated permanently → only neutral-gray hover on others
         if (cellHighlights[hKey]) { setHoverOverlay(null); return; }
-        const clipRegions = getGridClipRegionsInCanvas(workbookWrapperRef.current!, canvas);
-        const box = resolveVisibleCellOverlay(rect, origin, clipRegions);
+        const clip = getCellAreaClipInWrapper(workbookWrapperRef.current!);
+        const box = resolveVisibleCellOverlay(rect, origin, clip);
         if (!box) { setHoverOverlay(null); return; }
         setHoverOverlay({
           left: box.left, top: box.top,
@@ -561,9 +547,8 @@ export default function SheetPage() {
         const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
         const color = change ? userColor(userColors, change.username) : '#3B82F6';
         const wrap = workbookWrapperRef.current;
-        const canvas = getCanvas();
-        const clipRegions = wrap && canvas ? getGridClipRegionsInCanvas(wrap, canvas) : [];
-        const box = resolveVisibleCellOverlay(rect, origin, clipRegions);
+        const clip = wrap ? getCellAreaClipInWrapper(wrap) : null;
+        const box = resolveVisibleCellOverlay(rect, origin, clip);
         if (box) {
           setNavHighlight({ ...box, color });
           setTimeout(() => setNavHighlight(null), 2500);
@@ -726,26 +711,6 @@ export default function SheetPage() {
       }
     },
   }), []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Suppress edited-cell overlays during scroll; canvas redraw (afterRenderCell) can lag one frame
-  // behind the scrollbar, and keeping stale absolute positions caused visible "ghost" highlights.
-  useEffect(() => {
-    const wrap = workbookWrapperRef.current;
-    if (!wrap) return;
-
-    const onScroll = () => {
-      setIsScrolling(true);
-      if (scrollEndTimerRef.current) clearTimeout(scrollEndTimerRef.current);
-      scrollEndTimerRef.current = setTimeout(() => setIsScrolling(false), 100);
-    };
-
-    wrap.addEventListener('scroll', onScroll, { passive: true, capture: true });
-
-    return () => {
-      wrap.removeEventListener('scroll', onScroll, { capture: true });
-      if (scrollEndTimerRef.current) clearTimeout(scrollEndTimerRef.current);
-    };
-  }, [workbookKey, activeSheetIdx]);
 
   // Memoize the heavy FortuneSheet element so per-frame overlay re-renders (mapVersion/hover)
   // don't re-render the whole grid. Only rebuilds when its real inputs change.
@@ -979,39 +944,37 @@ export default function SheetPage() {
               Web-only decoration (absolutely-positioned divs) — never part of the sheet/export.
               Re-rendered whenever the cell map changes (mapVersion). */}
           {(() => {
-            void mapVersion; // dependency: recompute positions after each redraw
-            if (isScrolling) return null;
+            void mapVersion;
             const origin = getCanvasOrigin();
             if (!origin) return null;
-            const canvas = getCanvas();
             const wrap = workbookWrapperRef.current;
-            if (!canvas || !wrap) return null;
-            const clipRegions = getGridClipRegionsInCanvas(wrap, canvas);
+            if (!wrap) return null;
+            const clip = getCellAreaClipInWrapper(wrap);
             const map = cellRectMapRef.current;
             const prefix = `${activeSheetIdx}_`;
 
-            const items: React.ReactNode[] = [];
+            const overlayNodes: React.ReactNode[] = [];
             for (const hKey in cellHighlights) {
               if (!hKey.startsWith(prefix)) continue;
               const rect = map.get(hKey.slice(prefix.length));
               if (!rect) continue;
               const change = cellHighlights[hKey];
               if (!change) continue;
-              const box = resolveVisibleCellOverlay(rect, origin, clipRegions);
+              const box = resolveVisibleCellOverlay(rect, origin, clip);
               if (!box) continue;
+              const local = clip ? toClipLocal(box, clip) : box;
               const color = userColor(userColors, change.username);
-              items.push(
+              overlayNodes.push(
                 <div key={hKey} style={{
                   position: 'absolute',
-                  left: box.left,
-                  top: box.top,
-                  width: box.width,
-                  height: box.height,
+                  left: local.left,
+                  top: local.top,
+                  width: local.width,
+                  height: local.height,
                   background: color + '22', border: `1.5px solid ${color}`,
                   boxSizing: 'border-box', overflow: 'hidden',
-                  pointerEvents: 'none', zIndex: 49,
+                  pointerEvents: 'none',
                 }}>
-                  {/* Date/time — inside the cell, top-right */}
                   <span style={{
                     position: 'absolute', top: 0, right: 0,
                     fontSize: 8, lineHeight: '10px', color: '#475569',
@@ -1020,7 +983,6 @@ export default function SheetPage() {
                     padding: '0 2px', whiteSpace: 'nowrap', maxWidth: '100%',
                     overflow: 'hidden', textOverflow: 'ellipsis',
                   }}>{formatTime(change.saved_at)}</span>
-                  {/* Username — inside the cell, bottom-left */}
                   <span style={{
                     position: 'absolute', bottom: 0, left: 0,
                     fontSize: 9, lineHeight: '10px', color, padding: '0 2px 1px',
@@ -1030,7 +992,22 @@ export default function SheetPage() {
                 </div>
               );
             }
-            return items;
+            if (!overlayNodes.length) return null;
+            if (!clip) return overlayNodes;
+            return (
+              <div style={{
+                position: 'absolute',
+                left: clip.left,
+                top: clip.top,
+                width: clip.width,
+                height: clip.height,
+                overflow: 'hidden',
+                pointerEvents: 'none',
+                zIndex: 49,
+              }}>
+                {overlayNodes}
+              </div>
+            );
           })()}
 
           {/* Navigation highlight — shown 2.5s after clicking a history entry */}
