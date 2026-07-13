@@ -134,17 +134,29 @@ function clipRectToGridRegions(rect: PxRect, regions: PxRect[]): PxRect | null {
 function getGridClipRegionsInCanvas(wrapper: HTMLElement, canvas: HTMLCanvasElement): PxRect[] {
   const cRect = canvas.getBoundingClientRect();
   const regions: PxRect[] = [];
-  wrapper.querySelectorAll('.luckysheet-cell-main').forEach((node) => {
-    const m = node.getBoundingClientRect();
-    if (m.width <= 0 || m.height <= 0) return;
-    regions.push({
-      x: m.left - cRect.left,
-      y: m.top - cRect.top,
-      w: m.width,
-      h: m.height,
+  // FortuneSheet React uses .fortune-cell-area (not legacy .luckysheet-cell-main)
+  for (const sel of ['.fortune-cell-area', '.luckysheet-cell-main']) {
+    wrapper.querySelectorAll(sel).forEach((node) => {
+      const m = node.getBoundingClientRect();
+      if (m.width <= 0 || m.height <= 0) return;
+      regions.push({
+        x: m.left - cRect.left,
+        y: m.top - cRect.top,
+        w: m.width,
+        h: m.height,
+      });
     });
-  });
-  return regions;
+    if (regions.length) break;
+  }
+  if (regions.length) return regions;
+  // Fallback: canvas data area below/right of row & column headers
+  const rowHeader = wrapper.querySelector('.fortune-row-header');
+  const colHeader = wrapper.querySelector('.fortune-col-header-wrap') ?? wrapper.querySelector('.fortune-col-header');
+  const rh = rowHeader?.getBoundingClientRect();
+  const ch = colHeader?.getBoundingClientRect();
+  const x = rh ? rh.right - cRect.left : 0;
+  const y = ch ? ch.bottom - cRect.top : 0;
+  return [{ x, y, w: Math.max(0, cRect.width - x), h: Math.max(0, cRect.height - y) }];
 }
 
 function resolveVisibleCellOverlay(
@@ -152,6 +164,9 @@ function resolveVisibleCellOverlay(
   origin: { left: number; top: number },
   clipRegions: PxRect[],
 ): { left: number; top: number; width: number; height: number } | null {
+  if (!clipRegions.length) {
+    return { left: origin.left + rect.x, top: origin.top + rect.y, width: rect.w, height: rect.h };
+  }
   const clipped = clipRectToGridRegions(rect, clipRegions);
   if (!clipped) return null;
   return {
@@ -972,7 +987,6 @@ export default function SheetPage() {
             const wrap = workbookWrapperRef.current;
             if (!canvas || !wrap) return null;
             const clipRegions = getGridClipRegionsInCanvas(wrap, canvas);
-            if (!clipRegions.length) return null;
             const map = cellRectMapRef.current;
             const prefix = `${activeSheetIdx}_`;
 
