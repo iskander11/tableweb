@@ -18,3 +18,10 @@ canvas.fortune-sheet-canvas,
 .luckysheet-cell-main {
   cursor: cell !important;
 }
+
+/* Status bar / zoom — above the grid overlay, not treated as cells */
+.tw-sheet-grid-wrap .fortune-stat-area {
+  position: relative;
+  z-index: 30;
+  pointer-events: auto;
+}

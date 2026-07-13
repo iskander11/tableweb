@@ -104,19 +104,56 @@ function formatTime(iso: string) {
   return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+type CanvasRect = { x: number; y: number; w: number; h: number };
+
+function sheetIndexFromId(sheetId: string): number | null {
+  const m = /^sheet_(\d+)$/.exec(sheetId);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function intersectCanvasRect(a: CanvasRect, b: CanvasRect): CanvasRect | null {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.w, b.x + b.w);
+  const y2 = Math.min(a.y + a.h, b.y + b.h);
+  const w = x2 - x1;
+  const h = y2 - y1;
+  if (w <= 0.5 || h <= 0.5) return null;
+  return { x: x1, y: y1, w, h };
+}
+
+function getMainViewportInCanvas(wrapper: HTMLElement, canvas: HTMLCanvasElement): CanvasRect | null {
+  const area = wrapper.querySelector('.fortune-cell-area');
+  if (!area) return null;
+  const cRect = canvas.getBoundingClientRect();
+  const aRect = area.getBoundingClientRect();
+  if (aRect.width <= 0 || aRect.height <= 0) return null;
+  return {
+    x: aRect.left - cRect.left,
+    y: aRect.top - cRect.top,
+    w: aRect.width,
+    h: aRect.height,
+  };
+}
+
 // Draw edit markers on the sheet canvas (same layer as cells) so scroll/clipping stay pixel-perfect.
 function drawCellHighlightOnCanvas(
   ctx: CanvasRenderingContext2D,
   cellInfo: { startX: number; startY: number; endX: number; endY: number },
   change: { username: string; saved_at: string },
   colors: Record<string, string>,
+  viewport: CanvasRect | null,
 ) {
-  const x = cellInfo.startX;
-  const y = cellInfo.startY;
-  const w = cellInfo.endX - cellInfo.startX;
-  const h = cellInfo.endY - cellInfo.startY;
-  if (w <= 1 || h <= 1) return;
+  const cell: CanvasRect = {
+    x: cellInfo.startX,
+    y: cellInfo.startY,
+    w: cellInfo.endX - cellInfo.startX,
+    h: cellInfo.endY - cellInfo.startY,
+  };
+  const draw = viewport ? intersectCanvasRect(cell, viewport) : cell;
+  if (!draw || draw.w <= 1 || draw.h <= 1) return;
 
+  const { x, y, w, h } = draw;
   const color = userColor(colors, change.username);
   const timeStr = formatTime(change.saved_at);
 
@@ -180,6 +217,7 @@ export default function SheetPage() {
   const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
   const [cellHighlights, setCellHighlights] = useState<CellHighlightMap>({});
   const cellHighlightsRef = useRef<CellHighlightMap>({});
+  const viewportClipRef = useRef<CanvasRect | null>(null);
   const [userColors, setUserColors] = useState<Record<string, string>>({});
   // Overlay: absolute rect on the hovered cell + who edited it
   const [hoverOverlay, setHoverOverlay] = useState<{
@@ -455,37 +493,51 @@ export default function SheetPage() {
   }, [getCanvas]);
 
   const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const wrap = workbookWrapperRef.current;
+    const cellArea = wrap?.querySelector('.fortune-cell-area');
+    if (!cellArea) { setHoverOverlay(null); return; }
+    const aRect = cellArea.getBoundingClientRect();
+    if (
+      e.clientX < aRect.left || e.clientX >= aRect.right ||
+      e.clientY < aRect.top || e.clientY >= aRect.bottom
+    ) {
+      lastHoverKeyRef.current = null;
+      setHoverOverlay(null);
+      return;
+    }
+
     const canvas = getCanvas();
     const origin = getCanvasOrigin();
     if (!canvas || !origin) { setHoverOverlay(null); return; }
 
     const cRect = canvas.getBoundingClientRect();
-    // Mouse position relative to the canvas top-left, in CSS px — same space as the map rects
     const cx = e.clientX - cRect.left;
     const cy = e.clientY - cRect.top;
+    const viewport = viewportClipRef.current;
 
-    // Find the visible cell whose exact rect (from FortuneSheet) contains the cursor.
-    // The map holds every on-screen cell, so empty cells work too.
     const map = cellRectMapRef.current;
     for (const [key, rect] of map) {
-      if (cx >= rect.x && cx < rect.x + rect.w && cy >= rect.y && cy < rect.y + rect.h) {
-        // Optimization: cursor still inside the same cell → nothing to update
-        if (lastHoverKeyRef.current === key) return;
-        lastHoverKeyRef.current = key;
-        const [row, col] = key.split('_').map(Number);
-        const hKey = `${activeSheetIdx}_${row}_${col}`;
-        // Edited cells are already decorated permanently → only neutral-gray hover on others
-        if (cellHighlights[hKey]) { setHoverOverlay(null); return; }
-        setHoverOverlay({
-          left: origin.left + rect.x, top: origin.top + rect.y,
-          width: rect.w, height: rect.h,
-          color: '#94a3b8', username: null,
-        });
-        return;
+      if (viewport) {
+        const hit = intersectCanvasRect(rect, viewport);
+        if (!hit) continue;
+        if (cx < hit.x || cx >= hit.x + hit.w || cy < hit.y || cy >= hit.y + hit.h) continue;
+      } else if (cx < rect.x || cx >= rect.x + rect.w || cy < rect.y || cy >= rect.y + rect.h) {
+        continue;
       }
+      if (lastHoverKeyRef.current === key) return;
+      lastHoverKeyRef.current = key;
+      const [row, col] = key.split('_').map(Number);
+      const hKey = `${activeSheetIdxRef.current}_${row}_${col}`;
+      if (cellHighlightsRef.current[hKey]) { setHoverOverlay(null); return; }
+      setHoverOverlay({
+        left: origin.left + rect.x, top: origin.top + rect.y,
+        width: rect.w, height: rect.h,
+        color: '#94a3b8', username: null,
+      });
+      return;
     }
     if (lastHoverKeyRef.current !== null) { lastHoverKeyRef.current = null; setHoverOverlay(null); }
-  }, [activeSheetIdx, cellHighlights, getCanvas, getCanvasOrigin]);
+  }, [getCanvas, getCanvasOrigin]);
 
   const handleWorkbookMouseLeave = useCallback(() => {
     lastHoverKeyRef.current = null;
@@ -670,9 +722,23 @@ export default function SheetPage() {
   // canvas top-left). FortuneSheet's canvas context is pre-scaled by devicePixelRatio,
   // so startX/startY/endX/endY are already CSS px — no ratio conversion.
   const workbookHooks = useMemo(() => ({
-    // Broadcast our selection so other users see a live cursor. tabId is FortuneSheet's
-    // (now stable) sheet id; r/c are the active cell of the selection range.
+    beforeRenderCellArea: () => {
+      const wrap = workbookWrapperRef.current;
+      const canvas = wrap?.querySelector('canvas.fortune-sheet-canvas') as HTMLCanvasElement | null;
+      viewportClipRef.current = wrap && canvas ? getMainViewportInCanvas(wrap, canvas) : null;
+    },
+    afterActivateSheet: (sheetId: string) => {
+      const idx = sheetIndexFromId(sheetId);
+      if (idx == null) return;
+      activeSheetIdxRef.current = idx;
+      setActiveSheetIdx(idx);
+      requestAnimationFrame(() => {
+        nudgeWorkbookRedraw(workbookRef.current, workbookWrapperRef.current);
+      });
+    },
     afterSelectionChange: (tabId: string, sel: any) => {
+      const idx = sheetIndexFromId(tabId);
+      if (idx != null) activeSheetIdxRef.current = idx;
       const r = sel?.row?.[0];
       const c = sel?.column?.[0];
       if (typeof r !== 'number' || typeof c !== 'number') return;
@@ -691,7 +757,7 @@ export default function SheetPage() {
       const hKey = `${activeSheetIdxRef.current}_${r}_${c}`;
       const change = cellHighlightsRef.current[hKey];
       if (change && ctx) {
-        drawCellHighlightOnCanvas(ctx, cellInfo, change, userColorsRef.current);
+        drawCellHighlightOnCanvas(ctx, cellInfo, change, userColorsRef.current, viewportClipRef.current);
       }
 
       if (renderBatchTimerRef.current === null) {
@@ -890,7 +956,7 @@ export default function SheetPage() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
         <div
-          className="flex-1 overflow-hidden relative"
+          className="flex-1 overflow-hidden relative tw-sheet-grid-wrap"
           ref={workbookWrapperRef}
           onMouseMove={handleWorkbookMouseMove}
           onMouseDown={() => { setHoverOverlay(null); setNavHighlight(null); }}
