@@ -351,6 +351,9 @@ export default function SheetPage() {
   const [navHighlight, setNavHighlight] = useState<{
     left: number; top: number; width: number; height: number; color: string;
   } | null>(null);
+  const [shortcutHint, setShortcutHint] = useState<{ label: string; id: number } | null>(null);
+  const shortcutHintIdRef = useRef(0);
+  const shortcutHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const workbookWrapperRef = useRef<HTMLDivElement>(null);
   // Exact CSS-pixel rects of every VISIBLE cell, captured from FortuneSheet's afterRenderCell hook.
   // Coords are relative to the .fortune-sheet-canvas top-left (already CSS px — FortuneSheet's
@@ -840,6 +843,16 @@ export default function SheetPage() {
   const handleSaveNowRef = useRef(handleSaveNow);
   useEffect(() => { handleSaveNowRef.current = handleSaveNow; }, [handleSaveNow]);
 
+  const showShortcutHint = useCallback((label: string) => {
+    shortcutHintIdRef.current += 1;
+    const id = shortcutHintIdRef.current;
+    setShortcutHint({ label, id });
+    if (shortcutHintTimerRef.current) clearTimeout(shortcutHintTimerRef.current);
+    shortcutHintTimerRef.current = setTimeout(() => {
+      setShortcutHint((prev) => (prev?.id === id ? null : prev));
+    }, 2100);
+  }, []);
+
   // Excel-like shortcuts: Ctrl+S save + forward keys to FortuneSheet when grid was clicked.
   useEffect(() => {
     const wrap = workbookWrapperRef.current;
@@ -848,8 +861,9 @@ export default function SheetPage() {
       wrap,
       enabled: editor,
       onSave: () => handleSaveNowRef.current(),
+      onShortcutHint: showShortcutHint,
     });
-  }, [editor, sheets.length, workbookKey]);
+  }, [editor, sheets.length, workbookKey, showShortcutHint]);
 
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;
@@ -1186,6 +1200,19 @@ export default function SheetPage() {
           onMouseLeave={handleWorkbookMouseLeave}
         >
           {workbookEl}
+
+          {shortcutHint && (
+            <div
+              key={shortcutHint.id}
+              className="tw-shortcut-hint"
+              style={cellAreaClipRef.current ? {
+                left: cellAreaClipRef.current.x + cellAreaClipRef.current.w / 2,
+                top: cellAreaClipRef.current.y + cellAreaClipRef.current.h / 2,
+              } : { left: '50%', top: '50%' }}
+            >
+              {shortcutHint.label}
+            </div>
+          )}
 
           {/* Overlays clipped to the visible grid — borders must not bleed onto status bar / tabs */}
           {cellAreaClipRef.current && (hoverOverlay || navHighlight) && (

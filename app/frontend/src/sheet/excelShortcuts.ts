@@ -1,5 +1,9 @@
 /** Helpers so Excel-like shortcuts reach FortuneSheet even when focus is on the page chrome. */
 
+import { formatShortcutLabel, FORTUNE_DIALOG_SELECTOR } from './shortcutHint';
+
+export { formatShortcutLabel };
+
 export function ensureFortuneContainerFocusable(wrap: HTMLElement): void {
   const container = wrap.querySelector('.fortune-container') as HTMLElement | null;
   if (!container || container.getAttribute('tabindex') != null) return;
@@ -13,13 +17,26 @@ export function focusFortuneSheet(wrap: HTMLElement): void {
   (cellInput || container)?.focus?.();
 }
 
+export function focusSearchDialogInput(wrap: HTMLElement): void {
+  window.setTimeout(() => {
+    const input = wrap.querySelector('#fortune-search-replace input') as HTMLInputElement | null;
+    input?.focus();
+    input?.select();
+  }, 0);
+}
+
 function isInsideFortuneSheet(target: EventTarget | null, wrap: HTMLElement): boolean {
   if (!(target instanceof Node)) return false;
   return wrap.contains(target);
 }
 
+function isFortuneDialogTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && !!target.closest(FORTUNE_DIALOG_SELECTOR);
+}
+
 export function isExternalFormTarget(target: EventTarget | null, wrap: HTMLElement): boolean {
   if (!(target instanceof HTMLElement)) return false;
+  if (isFortuneDialogTarget(target)) return true;
   if (target.closest('.fortune-container, .fortune-workarea')) return false;
   if (target.closest('header')) return true;
   if (target.closest('[data-sheet-history]')) return true;
@@ -75,15 +92,18 @@ export type ExcelShortcutOptions = {
   wrap: HTMLElement;
   enabled: boolean;
   onSave: () => void;
+  onShortcutHint?: (label: string) => void;
 };
 
-export function bindExcelShortcuts({ wrap, enabled, onSave }: ExcelShortcutOptions): () => void {
+export function bindExcelShortcuts({ wrap, enabled, onSave, onShortcutHint }: ExcelShortcutOptions): () => void {
   ensureFortuneContainerFocusable(wrap);
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (!enabled) return;
     if (!isSpreadsheetShortcut(e)) return;
     if (isExternalFormTarget(e.target, wrap)) return;
+
+    onShortcutHint?.(formatShortcutLabel(e));
 
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.code === 'KeyS') {
       e.preventDefault();
@@ -92,9 +112,13 @@ export function bindExcelShortcuts({ wrap, enabled, onSave }: ExcelShortcutOptio
       return;
     }
 
-    if (fortuneSheetHasKeyboardFocus(wrap)) return;
+    if (fortuneSheetHasKeyboardFocus(wrap)) {
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyF') {
+        window.setTimeout(() => focusSearchDialogInput(wrap), 0);
+      }
+      return;
+    }
 
-    // Body / page chrome: user clicked the grid but focus stayed on document.
     const active = document.activeElement;
     const shouldForward =
       active === document.body ||
@@ -107,6 +131,10 @@ export function bindExcelShortcuts({ wrap, enabled, onSave }: ExcelShortcutOptio
     e.preventDefault();
     e.stopPropagation();
     forwardKeyboardEventToFortune(wrap, e);
+
+    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyF') {
+      focusSearchDialogInput(wrap);
+    }
   };
 
   const onPointerDown = (e: Event) => {
@@ -114,7 +142,8 @@ export function bindExcelShortcuts({ wrap, enabled, onSave }: ExcelShortcutOptio
     const target = e.target;
     if (!(target instanceof HTMLElement)) return;
     if (!wrap.contains(target)) return;
-    if (target.closest('header, [data-sheet-history], input, textarea, select, button')) return;
+    if (target.closest(`header, [data-sheet-history], ${FORTUNE_DIALOG_SELECTOR}`)) return;
+    if (target.closest('input, textarea, select, button')) return;
     if (target.closest('.fortune-container, .fortune-workarea, .fortune-cell-area, canvas.fortune-sheet-canvas')) {
       ensureFortuneContainerFocusable(wrap);
       focusFortuneSheet(wrap);
@@ -127,4 +156,4 @@ export function bindExcelShortcuts({ wrap, enabled, onSave }: ExcelShortcutOptio
     window.removeEventListener('keydown', onKeyDown, true);
     wrap.removeEventListener('mousedown', onPointerDown, true);
   };
-}
+};

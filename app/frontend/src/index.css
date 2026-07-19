@@ -19,6 +19,35 @@ canvas.fortune-sheet-canvas,
   cursor: cell !important;
 }
 
+@keyframes twShortcutHintFade {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.94); }
+  12%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  72%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1); }
+}
+
+.tw-shortcut-hint {
+  position: absolute;
+  z-index: 2000;
+  pointer-events: none;
+  padding: 10px 18px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #f8fafc;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+  animation: twShortcutHintFade 2s ease forwards;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+}
+
+#fortune-search-replace {
+  z-index: 2005 !important;
+}
+
 .tw-sheet-grid-wrap .fortune-cell-area {
   overflow: hidden !important;
 }
@@ -49,6 +78,13 @@ canvas.fortune-sheet-canvas,
 .tw-sheet-grid-wrap .luckysheet-scrollbar-x,
 .tw-sheet-grid-wrap .luckysheet-scrollbar-y,
 .tw-sheet-grid-wrap .fortune-stat-area,
-.tw-sheet-grid-wrap .luckysheet-sheet-area {
+.tw-sheet-grid-wrap .luckysheet-sheet-area,
+.tw-sheet-grid-wrap #fortune-search-replace,
+.tw-sheet-grid-wrap .fortune-search-replace,
+.tw-sheet-grid-wrap .fortune-dialog,
+.tw-sheet-grid-wrap .fortune-modal-container,
+.tw-sheet-grid-wrap .fortune-popover-backdrop,
+.tw-sheet-grid-wrap .luckysheet-filter-menu,
+.tw-sheet-grid-wrap .fortune-filter-options {
   pointer-events: auto;
 }
