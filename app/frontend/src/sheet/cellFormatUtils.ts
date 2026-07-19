@@ -1,6 +1,4 @@
-// @ts-expect-error ssf has no bundled types
 import SSF from 'ssf';
-
 export type FormatCategoryId =
   | 'general'
   | 'number'
