@@ -180,18 +180,63 @@ export function isValidFormatCode(fa: string): boolean {
   const code = sanitizeFormatCode(fa);
   if (!code) return false;
   if (code === 'General' || code === '@') return true;
-  try {
-    SSF.format(code, 0);
-    SSF.format(code, 1234.567);
-    SSF.format(code, 45292.5125);
-    return true;
-  } catch {
-    return false;
+
+  const samples = isDateFormatCode(code)
+    ? [45292.5125, 44927.5, 1]
+    : [0, 1234.567, 45292.5125, -1234.567];
+
+  for (const sample of samples) {
+    try {
+      SSF.format(code, sample);
+      return true;
+    } catch {
+      // try next sample
+    }
   }
+  return false;
 }
 
 export function isDateFormatCode(fa: string): boolean {
   return inferCellType(fa) === 'd';
+}
+
+/** Excel 1900-date-system serial (matches FortuneSheet datenum_local). */
+function dateToExcelSerial(date: Date): number {
+  const epoch = Date.UTC(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+  );
+  const dnthreshUtc = Date.UTC(1899, 11, 31, 0, 0, 0);
+  const base1904 = new Date(1900, 2, 1, 0, 0, 0);
+  let ms = epoch;
+  if (date >= base1904) ms += 24 * 60 * 60 * 1000;
+  return (ms - dnthreshUtc) / (24 * 60 * 60 * 1000);
+}
+
+function parseDateTimeString(s: string): number | null {
+  const t = s.trim().replace(/\s+/g, ' ');
+
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    const date = new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    if (Number.isNaN(date.getTime())) return null;
+    return dateToExcelSerial(date);
+  }
+
+  m = t.match(/^(\d{1,2})[./](\d{1,2})[./](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    let y = +m[3];
+    if (y < 100) y += 2000;
+    const date = new Date(y, +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    if (Number.isNaN(date.getTime())) return null;
+    return dateToExcelSerial(date);
+  }
+
+  return null;
 }
 
 function parseAsExcelSerial(v: unknown): number | null {
@@ -199,6 +244,10 @@ function parseAsExcelSerial(v: unknown): number | null {
   if (typeof v === 'string') {
     const t = v.trim();
     if (!t) return null;
+
+    const fromDate = parseDateTimeString(t);
+    if (fromDate != null) return fromDate;
+
     if (/^\d+$/.test(t) && t.length > 9) return null;
     const n = Number(t.replace(/\s/g, '').replace(',', '.'));
     if (!Number.isFinite(n)) return null;
@@ -251,18 +300,30 @@ export function sanitizeCellFormatValue(cell: any): any {
   }
 
   const t = inferCellType(fa);
-  const m = cell.v != null && cell.v !== ''
-    ? (safeFormatValue(fa, cell.v) ?? String(cell.v))
+  let v = cell.v;
+  if (isDateFormatCode(fa) && typeof v === 'string' && v.trim()) {
+    const serial = parseAsExcelSerial(v);
+    if (serial != null) v = serial;
+  }
+  const m = v != null && v !== ''
+    ? (safeFormatValue(fa, v) ?? String(v))
     : cell.m;
 
-  if (cell.ct.fa === fa && cell.ct.t === t && (m == null || cell.m === m)) return cell;
-  return { ...cell, ct: { ...cell.ct, fa, t }, ...(m != null ? { m } : {}) };
+  if (cell.ct.fa === fa && cell.ct.t === t && (m == null || cell.m === m) && v === cell.v) return cell;
+  return { ...cell, ct: { ...cell.ct, fa, t }, ...(v !== cell.v ? { v } : {}), ...(m != null ? { m } : {}) };
 }
 
 function sampleValueForFormat(fa: string, raw: unknown): number | string | boolean {
   const code = sanitizeFormatCode(fa);
   if (code === '@') return typeof raw === 'string' && raw ? raw : 'Текст';
   if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'string' && raw.trim()) {
+    const serial = parseAsExcelSerial(raw);
+    if (serial != null) {
+      if (isDateFormatCode(code) || /[dmyhH]/i.test(code)) return serial;
+    }
+    if (code === '@') return raw;
+  }
   if (raw != null && raw !== '' && !Number.isNaN(Number(raw))) {
     const n = Number(raw);
     if (isDateFormatCode(code) && (n < 0 || n > MAX_EXCEL_DATE_SERIAL)) return 45292.5125;
@@ -384,6 +445,24 @@ export function applyCellFormatToWorkbook(workbook: any, fa: string): FormatAppl
   const ct = { fa: ssfFa, t: inferCellType(ssfFa) };
 
   try {
+    for (const sel of selections) {
+      const r0 = sel.row[0];
+      const r1 = sel.row[1];
+      const c0 = sel.column[0];
+      const c1 = sel.column[1];
+      for (let r = r0; r <= r1; r += 1) {
+        for (let c = c0; c <= c1; c += 1) {
+          const cell = data?.[r]?.[c];
+          const v = cell && typeof cell === 'object' ? cell.v : cell;
+          if (v == null || v === '' || !isDateFormatCode(ssfFa)) continue;
+          const serial = parseAsExcelSerial(v);
+          if (serial != null && serial !== v && typeof workbook.setCellValue === 'function') {
+            workbook.setCellValue(r, c, serial);
+          }
+        }
+      }
+    }
+
     for (const sel of selections) {
       const range = { row: sel.row, column: sel.column };
       if (typeof workbook.setCellFormatByRange === 'function') {

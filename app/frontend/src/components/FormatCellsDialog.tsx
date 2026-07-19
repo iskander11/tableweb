@@ -58,7 +58,7 @@ export default function FormatCellsDialog({ open, workbookRef, onClose, onApplie
       const fa = cell?.ct?.fa || 'General';
       setTypeCode(fa);
       setCategoryId(categoryForFormat(fa));
-      setSampleRaw(cell?.v ?? workbook.getCellValue?.(r, c, { type: 'v' }));
+      setSampleRaw(cell?.v ?? workbook.getCellValue?.(r, c, { type: 'v' }) ?? cell?.m ?? null);
     } catch {
       setTypeCode('General');
       setCategoryId('general');
