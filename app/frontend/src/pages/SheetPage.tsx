@@ -9,6 +9,7 @@ import api from '../api/client';
 import { useAuth } from '../store/auth';
 import { useFonts } from '../fonts/useFonts';
 import { bindExcelShortcuts } from '../sheet/excelShortcuts';
+import FormatCellsDialog from '../components/FormatCellsDialog';
 
 interface OnlineUser { id: string; username: string }
 
@@ -352,6 +353,8 @@ export default function SheetPage() {
     left: number; top: number; width: number; height: number; color: string;
   } | null>(null);
   const [shortcutHint, setShortcutHint] = useState<{ label: string; id: number } | null>(null);
+  const [showFormatCells, setShowFormatCells] = useState(false);
+  const openFormatCellsRef = useRef(() => setShowFormatCells(true));
   const shortcutHintIdRef = useRef(0);
   const shortcutHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const workbookWrapperRef = useRef<HTMLDivElement>(null);
@@ -862,6 +865,7 @@ export default function SheetPage() {
       enabled: editor,
       onSave: () => handleSaveNowRef.current(),
       onShortcutHint: showShortcutHint,
+      onFormatCells: () => setShowFormatCells(true),
     });
   }, [editor, sheets.length, workbookKey, showShortcutHint]);
 
@@ -1021,6 +1025,12 @@ export default function SheetPage() {
       showFormulaBar
       allowEdit={editor}
       hooks={workbookHooks}
+      customToolbarItems={editor ? [{
+        key: 'format-cells-dialog',
+        tooltip: 'Формат ячеек (Ctrl+1)',
+        iconName: 'format',
+        onClick: () => openFormatCellsRef.current(),
+      }] : []}
       toolbarItems={[
         'undo','redo','|',
         'format-painter','clear-format','|',
@@ -1105,6 +1115,13 @@ export default function SheetPage() {
 
           {editor ? (
             <>
+              <button
+                onClick={() => setShowFormatCells(true)}
+                title="Формат ячеек (Ctrl+1)"
+                className="hidden md:flex items-center gap-1 text-xs sm:text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-2 sm:px-3 py-1.5 hover:bg-gray-50 transition"
+              >
+                Формат ячеек
+              </button>
               <button
                 onClick={handleSaveNow}
                 title="Сохранить (Ctrl+S)"
@@ -1359,6 +1376,15 @@ export default function SheetPage() {
           </>
         )}
       </div>
+
+      {editor && (
+        <FormatCellsDialog
+          open={showFormatCells}
+          workbookRef={workbookRef}
+          onClose={() => setShowFormatCells(false)}
+          onApplied={() => nudgeWorkbookRedraw(workbookRef.current, workbookWrapperRef.current)}
+        />
+      )}
     </div>
   );
 }

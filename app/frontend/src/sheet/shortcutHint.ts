@@ -19,4 +19,4 @@ export function formatShortcutLabel(e: KeyboardEvent): string {
 }
 
 export const FORTUNE_DIALOG_SELECTOR =
-  '#fortune-search-replace, .fortune-search-replace, .fortune-dialog, .fortune-modal-container, .fortune-popover-backdrop';
+  '#fortune-search-replace, .fortune-search-replace, .fortune-dialog, .fortune-modal-container, .fortune-popover-backdrop, .tw-format-cells-dialog, .tw-format-cells-backdrop';

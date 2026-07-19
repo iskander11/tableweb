@@ -92,16 +92,26 @@ export type ExcelShortcutOptions = {
   wrap: HTMLElement;
   enabled: boolean;
   onSave: () => void;
+  onFormatCells?: () => void;
   onShortcutHint?: (label: string) => void;
 };
 
-export function bindExcelShortcuts({ wrap, enabled, onSave, onShortcutHint }: ExcelShortcutOptions): () => void {
+export function bindExcelShortcuts({ wrap, enabled, onSave, onFormatCells, onShortcutHint }: ExcelShortcutOptions): () => void {
   ensureFortuneContainerFocusable(wrap);
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (!enabled) return;
-    if (!isSpreadsheetShortcut(e)) return;
     if (isExternalFormTarget(e.target, wrap)) return;
+
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.code === 'Digit1') {
+      e.preventDefault();
+      e.stopPropagation();
+      onShortcutHint?.(formatShortcutLabel(e));
+      onFormatCells?.();
+      return;
+    }
+
+    if (!isSpreadsheetShortcut(e)) return;
 
     onShortcutHint?.(formatShortcutLabel(e));
 
