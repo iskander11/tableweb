@@ -207,20 +207,83 @@ function nudgeWorkbookRedraw(wb: any, wrap: HTMLElement | null) {
   if (sby && sbx) wb.scroll({ scrollTop: sby.scrollTop, scrollLeft: sbx.scrollLeft });
 }
 
+function getCellAreaInWrapper(wrapper: HTMLElement): CanvasRect | null {
+  const area = wrapper.querySelector('.fortune-cell-area');
+  if (!area) return null;
+  const wRect = wrapper.getBoundingClientRect();
+  const aRect = area.getBoundingClientRect();
+  if (aRect.width <= 0 || aRect.height <= 0) return null;
+  return {
+    x: aRect.left - wRect.left,
+    y: aRect.top - wRect.top,
+    w: aRect.width,
+    h: aRect.height,
+  };
+}
+
+function clipOverlayToArea(
+  overlay: { left: number; top: number; width: number; height: number },
+  area: CanvasRect,
+): { left: number; top: number; width: number; height: number } | null {
+  const x1 = Math.max(overlay.left, area.x);
+  const y1 = Math.max(overlay.top, area.y);
+  const x2 = Math.min(overlay.left + overlay.width, area.x + area.w);
+  const y2 = Math.min(overlay.top + overlay.height, area.y + area.h);
+  const width = x2 - x1;
+  const height = y2 - y1;
+  if (width <= 0.5 || height <= 0.5) return null;
+  return { left: x1, top: y1, width, height };
+}
+
+function normalizeCellValue(v: any): any | null {
+  if (v == null) return null;
+  if (typeof v !== 'object') return v;
+  const o: Record<string, any> = {};
+  if ('v' in v) o.v = v.v;
+  if (v.m != null && v.m !== '') o.m = String(v.m);
+  if (v.f) o.f = v.f;
+  if (v.ct && (v.ct.fa || v.ct.t)) o.ct = { fa: v.ct.fa || 'General', t: v.ct.t || 'g' };
+  for (const k of ['bg', 'fc', 'bl', 'it', 'cl', 'un', 'fs', 'ff', 'ht', 'vt', 'tb', 'tr', 'ps', 'mc']) {
+    if (v[k] != null && v[k] !== '') o[k] = v[k];
+  }
+  return Object.keys(o).length ? o : null;
+}
+
+function normalizeCells(cells: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [key, v] of Object.entries(cells)) {
+    const n = normalizeCellValue(v);
+    if (n != null) out[key] = n;
+  }
+  return out;
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, val) => {
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      return Object.keys(val as object).sort().reduce<Record<string, unknown>>((acc, k) => {
+        acc[k] = (val as Record<string, unknown>)[k];
+        return acc;
+      }, {});
+    }
+    return val;
+  });
+}
+
 /** Snapshot of sheet fields we persist — used to detect real edits vs FortuneSheet init noise. */
 function sheetPersistSnapshot(sheet: any) {
   return {
     name: sheet.name,
-    cells: cellsFromSheet(sheet),
-    columnWidths: sheet.config?.columnlen || {},
-    rowHeights: sheet.config?.rowlen || {},
+    cells: normalizeCells(cellsFromSheet(sheet)),
+    columnWidths: numericKeys(sheet.config?.columnlen || {}),
+    rowHeights: numericKeys(sheet.config?.rowlen || {}),
     merges: sheet.config?.merge || {},
     borderInfo: sheet.config?.borderInfo || [],
     filterSelect: sheet.filter_select || null,
     filterCriteria: sheet.filter || null,
     frozen: sheet.frozen || null,
-    colhidden: sheet.config?.colhidden || {},
-    rowhidden: sheet.config?.rowhidden || {},
+    colhidden: numericKeys(sheet.config?.colhidden || {}),
+    rowhidden: numericKeys(sheet.config?.rowhidden || {}),
     conditionFormat: sheet.luckysheet_conditionformat_save || [],
     alternateFormat: sheet.luckysheet_alternateformat_save || [],
   };
@@ -229,7 +292,7 @@ function sheetPersistSnapshot(sheet: any) {
 function sheetsPersistEqual(a: any[] | null, b: any[] | null): boolean {
   if (!a || !b || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
-    if (JSON.stringify(sheetPersistSnapshot(a[i])) !== JSON.stringify(sheetPersistSnapshot(b[i]))) {
+    if (stableStringify(sheetPersistSnapshot(a[i])) !== stableStringify(sheetPersistSnapshot(b[i]))) {
       return false;
     }
   }
@@ -316,7 +379,26 @@ export default function SheetPage() {
   // FortuneSheet fires onChange during init — ignore until ready, then treat first call as baseline
   const acceptChangesRef = useRef(false);
   const baselineTakenRef = useRef(false);
+  const initPhaseRef = useRef(true);
+  const initPhaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirtyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cellAreaClipRef = useRef<CanvasRect | null>(null);
+  const [, overlayClipTick] = useState(0);
   const { version: fontsVersion } = useFonts();
+
+  const startInitPhase = useCallback(() => {
+    initPhaseRef.current = true;
+    baselineTakenRef.current = false;
+    if (initPhaseTimerRef.current) clearTimeout(initPhaseTimerRef.current);
+    initPhaseTimerRef.current = setTimeout(() => {
+      initPhaseRef.current = false;
+      baselineTakenRef.current = true;
+      if (latestSheetsRef.current) {
+        lastSavedSheetsRef.current = cloneSheets(latestSheetsRef.current);
+      }
+      setIsDirty(false);
+    }, 3500);
+  }, []);
 
   const { data: sheetMeta, isError: sheetError } = useQuery({
     queryKey: ['sheet', id],
@@ -387,7 +469,7 @@ export default function SheetPage() {
       const parsed = JSON.parse(raw);
       if (parsed?.sheets?.length) {
         acceptChangesRef.current = false;
-        baselineTakenRef.current = false;
+        startInitPhase();
         setSheets(parsed.sheets);
         latestSheetsRef.current = parsed.sheets;
         setWorkbookKey((k) => k + 1);
@@ -396,7 +478,7 @@ export default function SheetPage() {
       }
     } catch { /* ignore */ }
     setDraftInfo(null);
-  }, [draftKey]);
+  }, [draftKey, startInitPhase]);
 
   const discardDraft = useCallback(() => {
     try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
@@ -429,11 +511,34 @@ export default function SheetPage() {
   useEffect(() => {
     if (fontsVersion > 0) {
       acceptChangesRef.current = false;
-      baselineTakenRef.current = false;
+      startInitPhase();
       setWorkbookKey((k) => k + 1);
       setTimeout(() => { acceptChangesRef.current = true; }, 800);
     }
-  }, [fontsVersion]);
+  }, [fontsVersion, startInitPhase]);
+
+  // Keep overlay clip rect in sync with the visible grid area (excludes status bar / tabs).
+  useEffect(() => {
+    const wrap = workbookWrapperRef.current;
+    if (!wrap) return;
+    const syncClip = () => {
+      const area = getCellAreaInWrapper(wrap);
+      if (!area) return;
+      const prev = cellAreaClipRef.current;
+      if (!prev || prev.x !== area.x || prev.y !== area.y || prev.w !== area.w || prev.h !== area.h) {
+        cellAreaClipRef.current = area;
+        overlayClipTick((n) => n + 1);
+      }
+    };
+    syncClip();
+    const ro = new ResizeObserver(syncClip);
+    ro.observe(wrap);
+    wrap.addEventListener('scroll', syncClip, true);
+    return () => {
+      ro.disconnect();
+      wrap.removeEventListener('scroll', syncClip, true);
+    };
+  }, [workbookKey]);
 
   useEffect(() => {
     if (!sheetMeta) return;
@@ -466,10 +571,10 @@ export default function SheetPage() {
       lastSavedSheetsRef.current = cloneSheets(data);
     });
     acceptChangesRef.current = false;
-    baselineTakenRef.current = false;
+    startInitPhase();
     setIsDirty(false);
     setTimeout(() => { acceptChangesRef.current = true; }, 800);
-  }, [sheetMeta, id]);
+  }, [sheetMeta, id, startInitPhase]);
 
   // Reload changelog when panel opens (to get latest)
   useEffect(() => {
@@ -598,11 +703,18 @@ export default function SheetPage() {
       const [row, col] = key.split('_').map(Number);
       const hKey = `${activeSheetIdxRef.current}_${row}_${col}`;
       if (cellHighlightsRef.current[hKey]) { setHoverOverlay(null); return; }
-      setHoverOverlay({
-        left: origin.left + rect.x, top: origin.top + rect.y,
-        width: rect.w, height: rect.h,
-        color: '#94a3b8', username: null,
-      });
+      const areaClip = cellAreaClipRef.current ?? getCellAreaInWrapper(wrap);
+      const full = {
+        left: origin.left + rect.x,
+        top: origin.top + rect.y,
+        width: rect.w,
+        height: rect.h,
+        color: '#94a3b8',
+        username: null as string | null,
+      };
+      const clipped = areaClip ? clipOverlayToArea(full, areaClip) : full;
+      if (!clipped) { setHoverOverlay(null); return; }
+      setHoverOverlay({ ...full, ...clipped });
       return;
     }
     if (lastHoverKeyRef.current !== null) { lastHoverKeyRef.current = null; setHoverOverlay(null); }
@@ -656,10 +768,19 @@ export default function SheetPage() {
       if (rect && origin) {
         const change = cellHighlights[`${sheetIndex}_${r}_${c}`];
         const color = change ? userColor(userColors, change.username) : '#3B82F6';
-        setNavHighlight({
-          left: origin.left + rect.x, top: origin.top + rect.y,
-          width: rect.w, height: rect.h, color,
-        });
+        const wrap = workbookWrapperRef.current;
+        const areaClip = wrap ? (cellAreaClipRef.current ?? getCellAreaInWrapper(wrap)) : null;
+        const full = {
+          left: origin.left + rect.x,
+          top: origin.top + rect.y,
+          width: rect.w,
+          height: rect.h,
+          color,
+        };
+        const clipped = areaClip ? clipOverlayToArea(full, areaClip) : full;
+        if (clipped) {
+          setNavHighlight({ ...full, ...clipped });
+        }
         setTimeout(() => setNavHighlight(null), 2500);
       } else if (tries < 25) {
         setTimeout(tick, 70);
@@ -721,23 +842,26 @@ export default function SheetPage() {
     if (!acceptChangesRef.current) return;
     latestSheetsRef.current = allSheets;
 
-    const saved = lastSavedSheetsRef.current;
-    if (!baselineTakenRef.current) {
-      baselineTakenRef.current = true;
-      if (saved && sheetsPersistEqual(allSheets, saved)) {
-        lastSavedSheetsRef.current = cloneSheets(allSheets);
+    if (dirtyDebounceRef.current) clearTimeout(dirtyDebounceRef.current);
+    dirtyDebounceRef.current = setTimeout(() => {
+      const current = latestSheetsRef.current;
+      if (!current) return;
+
+      if (initPhaseRef.current) {
+        lastSavedSheetsRef.current = cloneSheets(current);
+        setIsDirty(false);
         return;
       }
-    }
 
-    if (saved && sheetsPersistEqual(allSheets, saved)) {
-      setIsDirty(false);
-      return;
-    }
+      const saved = lastSavedSheetsRef.current;
+      if (saved && sheetsPersistEqual(current, saved)) {
+        setIsDirty(false);
+        return;
+      }
 
-    setIsDirty(true);
-    // Broadcast to other users for real-time collaboration (no auto-save)
-    socketRef.current?.emit('cell-change', { sheetId: id, changes: allSheets });
+      setIsDirty(true);
+      socketRef.current?.emit('cell-change', { sheetId: id, changes: current });
+    }, 500);
   }, [id, editor]);
 
   const handleExport = async () => {
@@ -806,6 +930,10 @@ export default function SheetPage() {
       const wrap = workbookWrapperRef.current;
       const canvas = wrap?.querySelector('canvas.fortune-sheet-canvas') as HTMLCanvasElement | null;
       viewportClipRef.current = wrap && canvas ? getMainViewportInCanvas(wrap, canvas) : null;
+      if (wrap) {
+        const area = getCellAreaInWrapper(wrap);
+        if (area) cellAreaClipRef.current = area;
+      }
       return true;
     },
     afterActivateSheet: (sheetId: string) => {
@@ -1045,60 +1173,73 @@ export default function SheetPage() {
         >
           {workbookEl}
 
-          {/* Hover overlay — highlights the cell under the cursor */}
-          {hoverOverlay && (
+          {/* Overlays clipped to the visible grid — borders must not bleed onto status bar / tabs */}
+          {cellAreaClipRef.current && (hoverOverlay || navHighlight) && (
             <div
+              className="tw-overlay-clip"
               style={{
                 position: 'absolute',
-                left: hoverOverlay.left,
-                top: hoverOverlay.top,
-                width: hoverOverlay.width,
-                height: hoverOverlay.height,
-                background: hoverOverlay.color + '33',
-                border: `1px solid ${hoverOverlay.color}88`,
+                left: cellAreaClipRef.current.x,
+                top: cellAreaClipRef.current.y,
+                width: cellAreaClipRef.current.w,
+                height: cellAreaClipRef.current.h,
+                overflow: 'hidden',
                 pointerEvents: 'none',
                 zIndex: 50,
-                display: 'flex',
-                alignItems: 'flex-end',
-                overflow: 'hidden',
-                boxSizing: 'border-box',
               }}
             >
-              {hoverOverlay.username && (
-                <span style={{
-                  fontSize: 9,
-                  lineHeight: '10px',
-                  color: hoverOverlay.color,
-                  padding: '0 2px 1px',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  maxWidth: '100%',
-                  fontWeight: 600,
-                }}>
-                  {hoverOverlay.username}
-                </span>
+              {hoverOverlay && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: hoverOverlay.left - cellAreaClipRef.current.x,
+                    top: hoverOverlay.top - cellAreaClipRef.current.y,
+                    width: hoverOverlay.width,
+                    height: hoverOverlay.height,
+                    background: hoverOverlay.color + '33',
+                    border: `1px solid ${hoverOverlay.color}88`,
+                    pointerEvents: 'none',
+                    display: 'flex',
+                    alignItems: 'flex-end',
+                    overflow: 'hidden',
+                    boxSizing: 'border-box',
+                  }}
+                >
+                  {hoverOverlay.username && (
+                    <span style={{
+                      fontSize: 9,
+                      lineHeight: '10px',
+                      color: hoverOverlay.color,
+                      padding: '0 2px 1px',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      maxWidth: '100%',
+                      fontWeight: 600,
+                    }}>
+                      {hoverOverlay.username}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {navHighlight && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: navHighlight.left - cellAreaClipRef.current.x,
+                    top: navHighlight.top - cellAreaClipRef.current.y,
+                    width: navHighlight.width,
+                    height: navHighlight.height,
+                    background: navHighlight.color + '44',
+                    border: `2px solid ${navHighlight.color}`,
+                    pointerEvents: 'none',
+                    boxSizing: 'border-box',
+                    animation: 'twSheetPulse 0.6s ease-in-out 3',
+                  }}
+                />
               )}
             </div>
-          )}
-
-          {/* Navigation highlight — shown 2.5s after clicking a history entry */}
-          {navHighlight && (
-            <div
-              style={{
-                position: 'absolute',
-                left:   navHighlight.left,
-                top:    navHighlight.top,
-                width:  navHighlight.width,
-                height: navHighlight.height,
-                background: navHighlight.color + '44',
-                border: `2px solid ${navHighlight.color}`,
-                pointerEvents: 'none',
-                zIndex: 52,
-                boxSizing: 'border-box',
-                animation: 'twSheetPulse 0.6s ease-in-out 3',
-              }}
-            />
           )}
         </div>
 

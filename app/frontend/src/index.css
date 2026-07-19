@@ -19,6 +19,10 @@ canvas.fortune-sheet-canvas,
   cursor: cell !important;
 }
 
+.tw-sheet-grid-wrap .fortune-cell-area {
+  overflow: hidden !important;
+}
+
 /* Status bar / zoom — above the grid overlay, not treated as cells */
 .tw-sheet-grid-wrap .fortune-stat-area,
 .tw-sheet-grid-wrap .luckysheet-sheet-area,
