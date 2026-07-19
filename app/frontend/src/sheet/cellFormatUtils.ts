@@ -37,9 +37,8 @@ export const FORMAT_CATEGORIES: { id: FormatCategoryId; label: string; formats: 
     id: 'currency',
     label: 'Денежный',
     formats: [
-      { fa: '#,##0.00 ₽', label: '# ##0,00 ₽' },
-      { fa: '#,##0 ₽;-# ##0 ₽', label: '# ##0 ₽;-# ##0 ₽' },
-      { fa: '#,##0.00" ₽"', label: '# ##0,00 "₽"' },
+      { fa: '#,##0.00" ₽"', label: '# ##0,00 ₽' },
+      { fa: '#,##0" ₽";-#,##0" ₽"', label: '# ##0 ₽;-# ##0 ₽' },
     ],
   },
   {
@@ -115,6 +114,12 @@ const BUILTIN_FA_LIST: string[] = FORMAT_CATEGORIES.flatMap((c) => c.formats.map
 
 const CUSTOM_FA_STORAGE_KEY = 'tableweb_custom_cell_formats';
 
+/** Known invalid presets saved before the fix — map to SSF-safe codes. */
+const LEGACY_FORMAT_FIXES: Record<string, string> = {
+  '#,##0.00 ₽': '#,##0.00" ₽"',
+  '#,##0 ₽;-# ##0 ₽': '#,##0" ₽";-#,##0" ₽"',
+};
+
 /** Convert Russian Excel format tokens to SSF/English codes. */
 export function normalizeFormatCode(fa: string): string {
   let s = fa.trim();
@@ -145,16 +150,60 @@ export function normalizeFormatCode(fa: string): string {
   return s;
 }
 
+/** Make a format string safe for FortuneSheet/SSF (quote bare currency symbols, etc.). */
+export function sanitizeFormatCode(fa: string): string {
+  let code = normalizeFormatCode(fa);
+  if (LEGACY_FORMAT_FIXES[code]) return LEGACY_FORMAT_FIXES[code];
+
+  // Quote trailing currency symbols not already quoted: `#,##0.00 ₽` → `#,##0.00" ₽"`
+  code = code.replace(/(\d|\?|0|#|"|%)([ \u00A0])([₽$€])(?=($|;|\)|,))/g, '$1$2"$3"');
+  // Fix sections like `-# ##0 ₽` → `-#,##0" ₽"`
+  code = code.replace(/-#\s+##0\s*([₽$€])/g, '-#,##0"$1"');
+
+  return code;
+}
+
+export function isValidFormatCode(fa: string): boolean {
+  const code = sanitizeFormatCode(fa);
+  if (!code) return false;
+  if (code === 'General' || code === '@') return true;
+  try {
+    SSF.format(code, 0);
+    SSF.format(code, 1234.567);
+    SSF.format(code, 45292.5125);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function inferCellType(fa: string): string {
-  const code = normalizeFormatCode(fa);
+  const code = sanitizeFormatCode(fa);
   if (code === '@') return 's';
   if (code === 'General') return 'g';
-  if (/[dmyhHsSb]/i.test(code) && !/^#/.test(code) && !/[%₽$€]/.test(code)) return 'd';
+  try {
+    if (SSF.is_date(code)) return 'd';
+  } catch {
+    // fall through
+  }
+  if (/[dmyhH]/i.test(code) && !/^#/.test(code) && !/[%₽$€]/.test(code)) return 'd';
   return 'n';
 }
 
+/** Fix persisted cell ct so FortuneSheet won't crash on edit (SSF.format throws on bad fa). */
+export function sanitizeCellFormatValue(cell: any): any {
+  if (!cell || typeof cell !== 'object' || !cell.ct?.fa) return cell;
+  const fa = sanitizeFormatCode(String(cell.ct.fa));
+  if (!isValidFormatCode(fa)) {
+    return { ...cell, ct: { fa: 'General', t: 'g' } };
+  }
+  const t = inferCellType(fa);
+  if (cell.ct.fa === fa && cell.ct.t === t) return cell;
+  return { ...cell, ct: { ...cell.ct, fa, t } };
+}
+
 function sampleValueForFormat(fa: string, raw: unknown): number | string | boolean {
-  const code = normalizeFormatCode(fa);
+  const code = sanitizeFormatCode(fa);
   if (code === '@') return typeof raw === 'string' && raw ? raw : 'Текст';
   if (typeof raw === 'boolean') return raw;
   if (raw != null && raw !== '' && !Number.isNaN(Number(raw))) return Number(raw);
@@ -164,7 +213,7 @@ function sampleValueForFormat(fa: string, raw: unknown): number | string | boole
 }
 
 export function formatPreview(fa: string, rawValue?: unknown): string {
-  const code = normalizeFormatCode(fa);
+  const code = sanitizeFormatCode(fa);
   if (!code || code === 'General') {
     if (rawValue == null || rawValue === '') return '';
     return String(rawValue);
@@ -232,24 +281,29 @@ export function applyCellFormatToWorkbook(workbook: any, fa: string): boolean {
   const selections = workbook.getSelection() || [];
   if (!selections.length) return false;
 
-  const ssfFa = normalizeFormatCode(fa);
+  const ssfFa = sanitizeFormatCode(fa);
+  if (!isValidFormatCode(ssfFa)) return false;
   const ct = { fa: ssfFa, t: inferCellType(ssfFa) };
 
-  for (const sel of selections) {
-    const range = { row: sel.row, column: sel.column };
-    if (typeof workbook.setCellFormatByRange === 'function') {
-      workbook.setCellFormatByRange('ct', ct, range);
-      continue;
-    }
-    const r0 = sel.row[0];
-    const r1 = sel.row[1];
-    const c0 = sel.column[0];
-    const c1 = sel.column[1];
-    for (let r = r0; r <= r1; r += 1) {
-      for (let c = c0; c <= c1; c += 1) {
-        workbook.setCellFormat(r, c, 'ct', ct);
+  try {
+    for (const sel of selections) {
+      const range = { row: sel.row, column: sel.column };
+      if (typeof workbook.setCellFormatByRange === 'function') {
+        workbook.setCellFormatByRange('ct', ct, range);
+        continue;
+      }
+      const r0 = sel.row[0];
+      const r1 = sel.row[1];
+      const c0 = sel.column[0];
+      const c1 = sel.column[1];
+      for (let r = r0; r <= r1; r += 1) {
+        for (let c = c0; c <= c1; c += 1) {
+          workbook.setCellFormat(r, c, 'ct', ct);
+        }
       }
     }
+  } catch {
+    return false;
   }
   return true;
 }

@@ -10,6 +10,7 @@ import { useAuth } from '../store/auth';
 import { useFonts } from '../fonts/useFonts';
 import { bindExcelShortcuts } from '../sheet/excelShortcuts';
 import FormatCellsDialog from '../components/FormatCellsDialog';
+import { sanitizeCellFormatValue } from '../sheet/cellFormatUtils';
 
 interface OnlineUser { id: string; username: string }
 
@@ -1408,7 +1409,7 @@ function numericKeys(obj: Record<string, any>) {
 function flattenCells(cells: Record<string, any>) {
   return Object.entries(cells).map(([key, v]) => {
     const [r, c] = key.split('_').map(Number);
-    return { r, c, v };
+    return { r, c, v: sanitizeCellFormatValue(v) };
   });
 }
 
@@ -1428,7 +1429,7 @@ function cellsFromSheet(data: any): Record<string, any> {
       const row = matrix[r];
       if (!row) continue;
       for (let c = 0; c < row.length; c++) {
-        if (row[c] != null) cells[`${r}_${c}`] = row[c];
+        if (row[c] != null) cells[`${r}_${c}`] = sanitizeCellFormatValue(row[c]);
       }
     }
     return cells;

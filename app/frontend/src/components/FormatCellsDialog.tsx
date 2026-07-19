@@ -8,8 +8,10 @@ import {
   categoryForFormat,
   deleteCustomFormat,
   formatPreview,
+  isValidFormatCode,
   loadCustomFormats,
   saveCustomFormat,
+  sanitizeFormatCode,
 } from '../sheet/cellFormatUtils';
 
 type Props = {
@@ -85,8 +87,13 @@ export default function FormatCellsDialog({ open, workbookRef, onClose, onApplie
       setApplyError('Сначала выделите одну или несколько ячеек на листе.');
       return;
     }
-    if (applyCellFormatToWorkbook(workbook, fa)) {
-      saveCustomFormat(fa);
+    const safeFa = sanitizeFormatCode(fa);
+    if (!isValidFormatCode(safeFa)) {
+      setApplyError('Некорректный код формата. Проверьте синтаксис (символ ₽ нужно брать в кавычки: #" ₽").');
+      return;
+    }
+    if (applyCellFormatToWorkbook(workbook, safeFa)) {
+      saveCustomFormat(safeFa);
       onApplied?.();
       onClose();
       return;
