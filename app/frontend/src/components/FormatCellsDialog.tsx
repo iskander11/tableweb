@@ -89,16 +89,17 @@ export default function FormatCellsDialog({ open, workbookRef, onClose, onApplie
     }
     const safeFa = sanitizeFormatCode(fa);
     if (!isValidFormatCode(safeFa)) {
-      setApplyError('Некорректный код формата. Проверьте синтаксис (символ ₽ нужно брать в кавычки: #" ₽").');
+      setApplyError('Некорректный код формата. Для часов используйте «ч» или «чч», не «х». Пример: дд.мм.гг чч:мм');
       return;
     }
-    if (applyCellFormatToWorkbook(workbook, safeFa)) {
-      saveCustomFormat(safeFa);
-      onApplied?.();
-      onClose();
+    const result = applyCellFormatToWorkbook(workbook, safeFa);
+    if (!result.ok) {
+      setApplyError(result.error);
       return;
     }
-    setApplyError('Не удалось применить формат. Проверьте код формата.');
+    saveCustomFormat(safeFa);
+    onApplied?.();
+    onClose();
   }, [workbookRef, typeCode, onApplied, onClose]);
 
   const handleDelete = useCallback(() => {
@@ -196,6 +197,7 @@ export default function FormatCellsDialog({ open, workbookRef, onClose, onApplie
             <p className="tw-format-cells-hint">
               Введите код числового формата, используя один из существующих кодов в качестве образца.
               Поддерживаются коды Excel и русские обозначения (например, ДД.ММ.ГГГГ ч:мм).
+              Для часов используйте «ч» или «чч», не «х». Формат даты не подходит для длинных чисел вроде телефонов.
             </p>
             {applyError && <p className="tw-format-cells-error">{applyError}</p>}
           </div>

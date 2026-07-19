@@ -10,7 +10,7 @@ import { useAuth } from '../store/auth';
 import { useFonts } from '../fonts/useFonts';
 import { bindExcelShortcuts } from '../sheet/excelShortcuts';
 import FormatCellsDialog from '../components/FormatCellsDialog';
-import { sanitizeCellFormatValue } from '../sheet/cellFormatUtils';
+import { sanitizeCellFormatValue, guardCellBeforeUpdate } from '../sheet/cellFormatUtils';
 
 interface OnlineUser { id: string; username: string }
 
@@ -959,6 +959,10 @@ export default function SheetPage() {
   // canvas top-left). FortuneSheet's canvas context is pre-scaled by devicePixelRatio,
   // so startX/startY/endX/endY are already CSS px — no ratio conversion.
   const workbookHooks = useMemo(() => ({
+    beforeUpdateCell: (r: number, c: number, value: unknown) => {
+      guardCellBeforeUpdate(workbookRef.current, r, c, value);
+      return true;
+    },
     beforeRenderCellArea: () => {
       const wrap = workbookWrapperRef.current;
       const canvas = wrap?.querySelector('canvas.fortune-sheet-canvas') as HTMLCanvasElement | null;
