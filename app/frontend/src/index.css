@@ -20,8 +20,31 @@ canvas.fortune-sheet-canvas,
 }
 
 /* Status bar / zoom — above the grid overlay, not treated as cells */
-.tw-sheet-grid-wrap .fortune-stat-area {
+.tw-sheet-grid-wrap .fortune-stat-area,
+.tw-sheet-grid-wrap .luckysheet-sheet-area,
+.tw-sheet-grid-wrap .luckysheet-sheet-selection-calInfo {
   position: relative;
-  z-index: 30;
+  z-index: 50;
+  pointer-events: auto;
+  background: #fafafc;
+}
+
+.tw-sheet-grid-wrap .luckysheet-scrollbar-x,
+.tw-sheet-grid-wrap .luckysheet-scrollbar-y {
+  z-index: 1010 !important;
+  pointer-events: auto;
+}
+
+/* Let chrome (scrollbars, tabs, zoom) receive clicks instead of the full-height overlay */
+.tw-sheet-grid-wrap .fortune-sheet-overlay {
+  pointer-events: none;
+}
+.tw-sheet-grid-wrap .fortune-cell-area,
+.tw-sheet-grid-wrap .luckysheet-cols-h-c,
+.tw-sheet-grid-wrap .luckysheet-rows-h-c,
+.tw-sheet-grid-wrap .luckysheet-scrollbar-x,
+.tw-sheet-grid-wrap .luckysheet-scrollbar-y,
+.tw-sheet-grid-wrap .fortune-stat-area,
+.tw-sheet-grid-wrap .luckysheet-sheet-area {
   pointer-events: auto;
 }

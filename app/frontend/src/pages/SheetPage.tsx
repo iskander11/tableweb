@@ -63,6 +63,12 @@ function buildSheets(sheetMeta: any) {
     }
 
     if (data.frozen) sheet.frozen = data.frozen;
+    if (data.luckysheet_conditionformat_save != null) {
+      sheet.luckysheet_conditionformat_save = data.luckysheet_conditionformat_save;
+    }
+    if (data.luckysheet_alternateformat_save != null) {
+      sheet.luckysheet_alternateformat_save = data.luckysheet_alternateformat_save;
+    }
     return sheet;
   });
 }
@@ -201,6 +207,58 @@ function nudgeWorkbookRedraw(wb: any, wrap: HTMLElement | null) {
   if (sby && sbx) wb.scroll({ scrollTop: sby.scrollTop, scrollLeft: sbx.scrollLeft });
 }
 
+/** Snapshot of sheet fields we persist — used to detect real edits vs FortuneSheet init noise. */
+function sheetPersistSnapshot(sheet: any) {
+  return {
+    name: sheet.name,
+    cells: cellsFromSheet(sheet),
+    columnWidths: sheet.config?.columnlen || {},
+    rowHeights: sheet.config?.rowlen || {},
+    merges: sheet.config?.merge || {},
+    borderInfo: sheet.config?.borderInfo || [],
+    filterSelect: sheet.filter_select || null,
+    filterCriteria: sheet.filter || null,
+    frozen: sheet.frozen || null,
+    colhidden: sheet.config?.colhidden || {},
+    rowhidden: sheet.config?.rowhidden || {},
+    conditionFormat: sheet.luckysheet_conditionformat_save || [],
+    alternateFormat: sheet.luckysheet_alternateformat_save || [],
+  };
+}
+
+function sheetsPersistEqual(a: any[] | null, b: any[] | null): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (JSON.stringify(sheetPersistSnapshot(a[i])) !== JSON.stringify(sheetPersistSnapshot(b[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function cloneSheets(sheets: any[]): any[] {
+  return JSON.parse(JSON.stringify(sheets));
+}
+
+function isOverSheetChrome(clientX: number, clientY: number, wrap: HTMLElement): boolean {
+  const selectors = [
+    '.luckysheet-scrollbar-x',
+    '.luckysheet-scrollbar-y',
+    '.fortune-stat-area',
+    '.luckysheet-sheet-area',
+    '.luckysheet-sheet-selection-calInfo',
+  ];
+  for (const sel of selectors) {
+    for (const el of wrap.querySelectorAll(sel)) {
+      const r = el.getBoundingClientRect();
+      if (clientX >= r.left && clientX < r.right && clientY >= r.top && clientY < r.bottom) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export default function SheetPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -305,17 +363,22 @@ export default function SheetPage() {
     return () => clearInterval(iv);
   }, [editor, draftKey]);
 
-  // On open, surface any leftover draft (its mere presence means it was never saved).
+  // On open, surface any leftover draft (discard if it matches server data).
   useEffect(() => {
-    if (!editor || !draftKey) return;
+    if (!editor || !draftKey || !sheets.length) return;
     try {
       const raw = localStorage.getItem(draftKey);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed?.sheets?.length) setDraftInfo({ savedAt: parsed.savedAt });
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed?.sheets?.length) return;
+      if (sheetsPersistEqual(parsed.sheets, sheets)) {
+        localStorage.removeItem(draftKey);
+        setDraftInfo(null);
+        return;
       }
+      setDraftInfo({ savedAt: parsed.savedAt });
     } catch { /* ignore corrupt draft */ }
-  }, [editor, draftKey]);
+  }, [editor, draftKey, sheets]);
 
   const restoreDraft = useCallback(() => {
     try {
@@ -395,12 +458,12 @@ export default function SheetPage() {
       const built = buildSheets(sheetMeta);
       const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
       setSheets(data);
-      lastSavedSheetsRef.current = data;
+      lastSavedSheetsRef.current = cloneSheets(data);
     }).catch(() => {
       const built = buildSheets(sheetMeta);
       const data = built.length ? built : [{ name: 'Sheet1', index: 0, status: 1, celldata: [], config: {} }];
       setSheets(data);
-      lastSavedSheetsRef.current = data;
+      lastSavedSheetsRef.current = cloneSheets(data);
     });
     acceptChangesRef.current = false;
     baselineTakenRef.current = false;
@@ -494,7 +557,13 @@ export default function SheetPage() {
 
   const handleWorkbookMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const wrap = workbookWrapperRef.current;
-    const cellArea = wrap?.querySelector('.fortune-cell-area');
+    if (!wrap) { setHoverOverlay(null); return; }
+    if (isOverSheetChrome(e.clientX, e.clientY, wrap)) {
+      lastHoverKeyRef.current = null;
+      setHoverOverlay(null);
+      return;
+    }
+    const cellArea = wrap.querySelector('.fortune-cell-area');
     if (!cellArea) { setHoverOverlay(null); return; }
     const aRect = cellArea.getBoundingClientRect();
     if (
@@ -621,6 +690,8 @@ export default function SheetPage() {
         frozen: s.frozen || null,
         colhidden: s.config?.colhidden || {},
         rowhidden: s.config?.rowhidden || {},
+        luckysheet_conditionformat_save: s.luckysheet_conditionformat_save || [],
+        luckysheet_alternateformat_save: s.luckysheet_alternateformat_save || [],
       };
       socketRef.current?.emit('save-sheet', {
         sheetId: id,
@@ -636,6 +707,7 @@ export default function SheetPage() {
     const all = latestSheetsRef.current || sheets;
     setSaveState('saving');
     saveAll(all);
+    lastSavedSheetsRef.current = cloneSheets(all);
     setIsDirty(false);
     // Work is now persisted server-side — drop the local draft and its restore banner.
     try { if (draftKey) localStorage.removeItem(draftKey); } catch { /* ignore */ }
@@ -647,14 +719,22 @@ export default function SheetPage() {
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;
     if (!acceptChangesRef.current) return;
-    // First onChange after init timeout: treat as baseline (FortuneSheet may still be normalizing)
+    latestSheetsRef.current = allSheets;
+
+    const saved = lastSavedSheetsRef.current;
     if (!baselineTakenRef.current) {
       baselineTakenRef.current = true;
-      latestSheetsRef.current = allSheets;
-      lastSavedSheetsRef.current = JSON.parse(JSON.stringify(allSheets));
+      if (saved && sheetsPersistEqual(allSheets, saved)) {
+        lastSavedSheetsRef.current = cloneSheets(allSheets);
+        return;
+      }
+    }
+
+    if (saved && sheetsPersistEqual(allSheets, saved)) {
+      setIsDirty(false);
       return;
     }
-    latestSheetsRef.current = allSheets;
+
     setIsDirty(true);
     // Broadcast to other users for real-time collaboration (no auto-save)
     socketRef.current?.emit('cell-change', { sheetId: id, changes: allSheets });
