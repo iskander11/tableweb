@@ -162,8 +162,26 @@ export function sanitizeFormatCode(fa: string): string {
 
   code = code.replace(/(\d|\?|0|#|"|%)([ \u00A0])([₽$€])(?=($|;|\)|,))/g, '$1$2"$3"');
   code = code.replace(/-#\s+##0\s*([₽$€])/g, '-#,##0"$1"');
+  code = quoteDotSeparatorsInDateFormat(code);
 
   return code;
+}
+
+/** SSF requires quoted dots in date patterns: dd.mm.yyyy → dd"."mm"."yyyy */
+function quoteDotSeparatorsInDateFormat(code: string): string {
+  if (!/[dy]/i.test(code)) return code;
+  let s = code;
+  let prev = '';
+  while (s !== prev) {
+    prev = s;
+    s = s.replace(/([dmy]+)\.([dmy]+)/gi, '$1"."$2');
+  }
+  return s;
+}
+
+/** Show SSF-safe format in user-friendly form for the type input. */
+export function displayFormatCode(fa: string): string {
+  return fa.replace(/"\."'/g, '.');
 }
 
 export function safeFormatValue(fa: string, v: unknown): string | null {
@@ -420,7 +438,7 @@ export function applyCellFormatToWorkbook(workbook: any, fa: string): FormatAppl
 
   const ssfFa = sanitizeFormatCode(fa);
   if (!isValidFormatCode(ssfFa)) {
-    return { ok: false, error: 'Некорректный код формата. Для часов используйте «ч» или «чч», не «х».' };
+    return { ok: false, error: 'Некорректный код формата. Проверьте синтаксис или выберите формат из списка.' };
   }
 
   const sheet = workbook.getSheet?.();

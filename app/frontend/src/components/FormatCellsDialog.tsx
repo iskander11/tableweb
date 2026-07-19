@@ -7,6 +7,7 @@ import {
   applyCellFormatToWorkbook,
   categoryForFormat,
   deleteCustomFormat,
+  displayFormatCode,
   formatPreview,
   isValidFormatCode,
   loadCustomFormats,
@@ -56,7 +57,7 @@ export default function FormatCellsDialog({ open, workbookRef, onClose, onApplie
       const sheet = workbook.getSheet?.();
       const cell = sheet?.data?.[r]?.[c];
       const fa = cell?.ct?.fa || 'General';
-      setTypeCode(fa);
+      setTypeCode(displayFormatCode(fa));
       setCategoryId(categoryForFormat(fa));
       setSampleRaw(cell?.v ?? workbook.getCellValue?.(r, c, { type: 'v' }) ?? cell?.m ?? null);
     } catch {
@@ -89,7 +90,7 @@ export default function FormatCellsDialog({ open, workbookRef, onClose, onApplie
     }
     const safeFa = sanitizeFormatCode(fa);
     if (!isValidFormatCode(safeFa)) {
-      setApplyError('Некорректный код формата. Для часов используйте «ч» или «чч», не «х». Пример: дд.мм.гг чч:мм');
+      setApplyError('Некорректный код формата. Для часов — «ч» или «чч» (не «х»). Для дат с точками: дд.мм.гггг чч:мм');
       return;
     }
     const result = applyCellFormatToWorkbook(workbook, safeFa);
