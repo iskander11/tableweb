@@ -8,6 +8,7 @@ import { ArrowLeft, Download, Upload, Users, Save, History, X, Info } from 'luci
 import api from '../api/client';
 import { useAuth } from '../store/auth';
 import { useFonts } from '../fonts/useFonts';
+import { bindExcelShortcuts } from '../sheet/excelShortcuts';
 
 interface OnlineUser { id: string; username: string }
 
@@ -836,6 +837,19 @@ export default function SheetPage() {
     setSaveState('saved');
     setTimeout(() => setSaveState('idle'), 2000);
   }, [saveAll, sheets, draftKey]);
+  const handleSaveNowRef = useRef(handleSaveNow);
+  useEffect(() => { handleSaveNowRef.current = handleSaveNow; }, [handleSaveNow]);
+
+  // Excel-like shortcuts: Ctrl+S save + forward keys to FortuneSheet when grid was clicked.
+  useEffect(() => {
+    const wrap = workbookWrapperRef.current;
+    if (!wrap || !editor || !sheets.length) return;
+    return bindExcelShortcuts({
+      wrap,
+      enabled: editor,
+      onSave: () => handleSaveNowRef.current(),
+    });
+  }, [editor, sheets.length, workbookKey]);
 
   const handleChange = useCallback((allSheets: any) => {
     if (!editor || !allSheets?.length) return;
@@ -1079,7 +1093,7 @@ export default function SheetPage() {
             <>
               <button
                 onClick={handleSaveNow}
-                title="Сохранить все изменения (обязательно нажмите после редактирования)"
+                title="Сохранить (Ctrl+S)"
                 className={`flex items-center gap-1 text-xs sm:text-sm rounded-lg px-2 sm:px-3 py-1.5 border transition font-medium ${
                   saveState === 'saved'
                     ? 'border-green-300 bg-green-50 text-green-600'
@@ -1251,7 +1265,7 @@ export default function SheetPage() {
               className="fixed inset-0 bg-black/30 z-20 sm:hidden"
               onClick={() => setShowHistory(false)}
             />
-            <div className="fixed right-0 top-0 bottom-0 w-80 max-w-[90vw] z-30 sm:static sm:z-auto sm:w-72 sm:max-w-none border-l bg-white flex flex-col shrink-0 overflow-hidden shadow-xl sm:shadow-none">
+            <div data-sheet-history className="fixed right-0 top-0 bottom-0 w-80 max-w-[90vw] z-30 sm:static sm:z-auto sm:w-72 sm:max-w-none border-l bg-white flex flex-col shrink-0 overflow-hidden shadow-xl sm:shadow-none">
               <div className="flex items-center justify-between px-3 py-3 border-b shrink-0">
                 <span className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
                   <History size={14} /> История изменений
