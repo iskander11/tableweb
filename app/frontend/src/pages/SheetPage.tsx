@@ -11,6 +11,12 @@ import { useFonts } from '../fonts/useFonts';
 import { bindExcelShortcuts } from '../sheet/excelShortcuts';
 import FormatCellsDialog from '../components/FormatCellsDialog';
 import { sanitizeCellFormatValue, guardCellBeforeUpdate } from '../sheet/cellFormatUtils';
+import {
+  commitActiveCellEdit,
+  waitForSheetCommit,
+  saveSheetPayloads,
+  type SheetSavePayload,
+} from '../sheet/sheetSave';
 
 interface OnlineUser { id: string; username: string }
 
@@ -335,7 +341,8 @@ export default function SheetPage() {
   const [sheets, setSheets] = useState<any[]>([]);
   const [importState, setImportState] = useState<ImportState>({ active: false, progress: 0, error: null });
   const [workbookKey, setWorkbookKey] = useState(0);
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [changelog, setChangelog] = useState<ChangeEntry[]>([]);
@@ -390,6 +397,7 @@ export default function SheetPage() {
   const initPhaseRef = useRef(true);
   const initPhaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dirtyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveInFlightRef = useRef(false);
   const cellAreaClipRef = useRef<CanvasRect | null>(null);
   const [, overlayClipTick] = useState(0);
   const { version: fontsVersion } = useFonts();
@@ -649,6 +657,16 @@ export default function SheetPage() {
         });
       }
     });
+    socket.on('error', (msg: unknown) => {
+      if (saveInFlightRef.current) return;
+      const text = typeof msg === 'string' ? msg : 'Ошибка сервера';
+      setSaveError(text);
+      setSaveState('error');
+      window.setTimeout(() => {
+        setSaveState((s) => (s === 'error' ? 'idle' : s));
+        setSaveError(null);
+      }, 5000);
+    });
     return () => { socket.disconnect(); };
   }, [id, token]);
 
@@ -805,9 +823,11 @@ export default function SheetPage() {
 
   // Note: change detection (diff + summary) is computed server-side on save.
 
-  const saveAll = useCallback((allSheets: any[]) => {
-    (allSheets || []).forEach((s, i) => {
-      const data = {
+  const buildSheetPayloads = useCallback((allSheets: any[]): SheetSavePayload[] => {
+    return (allSheets || []).map((s, i) => ({
+      sheetIndex: s.index ?? i,
+      logChange: i === 0,
+      data: {
         name: s.name,
         cells: cellsFromSheet(s),
         columnWidths: s.config?.columnlen || {},
@@ -821,29 +841,42 @@ export default function SheetPage() {
         rowhidden: s.config?.rowhidden || {},
         luckysheet_conditionformat_save: s.luckysheet_conditionformat_save || [],
         luckysheet_alternateformat_save: s.luckysheet_alternateformat_save || [],
-      };
-      socketRef.current?.emit('save-sheet', {
-        sheetId: id,
-        sheetIndex: s.index ?? i,
-        data,
-        // Backend computes the diff from DB; only the first sheet gets a changelog entry
-        logChange: i === 0,
-      });
-    });
-  }, [id]);
+      },
+    }));
+  }, []);
 
-  const handleSaveNow = useCallback(() => {
-    const all = latestSheetsRef.current || sheets;
+  const handleSaveNow = useCallback(async () => {
+    if (!id || saveInFlightRef.current) return;
+
+    saveInFlightRef.current = true;
     setSaveState('saving');
-    saveAll(all);
-    lastSavedSheetsRef.current = cloneSheets(all);
-    setIsDirty(false);
-    // Work is now persisted server-side — drop the local draft and its restore banner.
-    try { if (draftKey) localStorage.removeItem(draftKey); } catch { /* ignore */ }
-    setDraftInfo(null);
-    setSaveState('saved');
-    setTimeout(() => setSaveState('idle'), 2000);
-  }, [saveAll, sheets, draftKey]);
+    setSaveError(null);
+
+    try {
+      commitActiveCellEdit(workbookWrapperRef.current);
+      await waitForSheetCommit();
+
+      const all = latestSheetsRef.current || sheets;
+      await saveSheetPayloads(socketRef.current, id, buildSheetPayloads(all));
+
+      lastSavedSheetsRef.current = cloneSheets(all);
+      setIsDirty(false);
+      try { if (draftKey) localStorage.removeItem(draftKey); } catch { /* ignore */ }
+      setDraftInfo(null);
+      setSaveState('saved');
+      window.setTimeout(() => setSaveState('idle'), 2000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Ошибка сохранения';
+      setSaveError(msg);
+      setSaveState('error');
+      window.setTimeout(() => {
+        setSaveState((s) => (s === 'error' ? 'idle' : s));
+        setSaveError(null);
+      }, 5000);
+    } finally {
+      saveInFlightRef.current = false;
+    }
+  }, [id, buildSheetPayloads, sheets, draftKey]);
   const handleSaveNowRef = useRef(handleSaveNow);
   useEffect(() => { handleSaveNowRef.current = handleSaveNow; }, [handleSaveNow]);
 
@@ -1129,10 +1162,13 @@ export default function SheetPage() {
               </button>
               <button
                 onClick={handleSaveNow}
+                disabled={saveState === 'saving'}
                 title="Сохранить (Ctrl+S)"
-                className={`flex items-center gap-1 text-xs sm:text-sm rounded-lg px-2 sm:px-3 py-1.5 border transition font-medium ${
+                className={`flex items-center gap-1 text-xs sm:text-sm rounded-lg px-2 sm:px-3 py-1.5 border transition font-medium disabled:opacity-60 disabled:cursor-wait ${
                   saveState === 'saved'
                     ? 'border-green-300 bg-green-50 text-green-600'
+                    : saveState === 'error'
+                    ? 'border-red-300 bg-red-50 text-red-600'
                     : isDirty
                     ? 'border-orange-300 bg-orange-50 text-orange-600 animate-pulse'
                     : 'border-gray-200 text-gray-600 hover:text-gray-800 hover:bg-gray-50'
@@ -1140,7 +1176,13 @@ export default function SheetPage() {
               >
                 <Save size={14} />
                 <span className="hidden xs:inline">
-                  {saveState === 'saved' ? 'Сохранено' : 'Сохранить'}
+                  {saveState === 'saving'
+                    ? 'Сохранение…'
+                    : saveState === 'saved'
+                    ? 'Сохранено'
+                    : saveState === 'error'
+                    ? 'Ошибка'
+                    : 'Сохранить'}
                 </span>
               </button>
               <label
@@ -1207,6 +1249,13 @@ export default function SheetPage() {
         <div className="bg-orange-50 border-b border-orange-100 px-4 py-1.5 flex items-center gap-2 text-xs text-orange-700 shrink-0">
           <Info size={14} className="shrink-0" />
           <span>Есть несохранённые изменения — нажмите кнопку <strong>«Сохранить»</strong> чтобы не потерять их.</span>
+        </div>
+      )}
+
+      {editor && saveState === 'error' && saveError && (
+        <div className="bg-red-50 border-b border-red-100 px-4 py-1.5 flex items-center gap-2 text-xs text-red-700 shrink-0">
+          <Info size={14} className="shrink-0" />
+          <span>Не удалось сохранить: {saveError}. Попробуйте ещё раз.</span>
         </div>
       )}
 

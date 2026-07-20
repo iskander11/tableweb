@@ -10,21 +10,19 @@ import jwt from 'jsonwebtoken';
 
 import { siteAuthLogin, requireSiteAuth } from './middleware/siteAuth.js';
 import authRoutes from './routes/auth.js';
-import spreadsheetRoutes from './routes/spreadsheets.js';
+import spreadsheetRoutes, { attachSheetSaveIo } from './routes/spreadsheets.js';
 import excelRoutes from './routes/excel.js';
 import backupRoutes from './routes/backup.js';
 import fontRoutes, { ensureFontsTable, FONTS_DIR } from './routes/fonts.js';
 import { query } from './db/index.js';
 import { exportExcel } from './services/excel.js';
 import { canEditSheet } from './services/permissions.js';
+import { persistSpreadsheetSheet } from './services/sheetSave.js';
 import { createWriteStream, mkdirSync } from 'fs';
 import { join } from 'path';
 import archiver from 'archiver';
 
 dotenv.config();
-
-// Max change_log entries retained per spreadsheet (older ones are pruned on each save).
-const CHANGELOG_LIMIT = Number(process.env.CHANGELOG_LIMIT) || 200;
 
 const app = express();
 const httpServer = createServer(app);
@@ -32,6 +30,7 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: process.env.FRONTEND_URL || '*', credentials: true },
 });
+attachSheetSaveIo(io);
 
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
 app.use(compression());
@@ -94,68 +93,30 @@ io.on('connection', (socket) => {
     io.emit('user-color-changed', { username: socket.user.username, color });
   });
 
-  socket.on('save-sheet', async ({ sheetId, sheetIndex, data, logChange }) => {
+  socket.on('save-sheet', async (payload, ack) => {
+    const { sheetId, sheetIndex, data, logChange } = payload || {};
     try {
-      // Enforce the role model server-side: readers must never persist changes,
-      // even via a crafted emit. Editors/admins may edit any table.
       if (!canEditSheet(socket.user)) {
-        socket.emit('error', 'Нет прав на редактирование этой таблицы');
+        const msg = 'Нет прав на редактирование этой таблицы';
+        if (typeof ack === 'function') ack({ ok: false, error: msg });
+        else socket.emit('error', msg);
         return;
       }
-      // Compute diff server-side before overwriting (backend always has the ground truth)
-      let changedCells = null;
-      let summary = null;
-      if (logChange) {
-        try {
-          const prev = await query(
-            'SELECT data FROM spreadsheet_data WHERE spreadsheet_id = $1 AND sheet_index = $2',
-            [sheetId, sheetIndex]
-          );
-          if (prev.rows.length > 0) {
-            const diff = computeSheetDiff(prev.rows[0].data, data);
-            changedCells = diff.cells.length > 0 ? diff.cells : null;
-            summary = diff.summary;
-          }
-        } catch (_) { /* diff failure must not block the save */ }
+      const result = await persistSpreadsheetSheet({
+        sheetId,
+        sheetIndex,
+        data,
+        user: socket.user,
+        logChange: !!logChange,
+      });
+      if (result.entry) {
+        io.to(sheetId).emit('changelog-update', result.entry);
       }
-
-      await query(
-        `INSERT INTO spreadsheet_data (spreadsheet_id, sheet_index, data)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (spreadsheet_id, sheet_index) DO UPDATE SET data = $3, updated_at = NOW()`,
-        [sheetId, sheetIndex, JSON.stringify(data)]
-      );
-      await query('UPDATE spreadsheets SET updated_at = NOW() WHERE id = $1', [sheetId]);
-
-      if (logChange) {
-        await query(
-          `INSERT INTO change_log (spreadsheet_id, sheet_index, user_id, username, summary, changed_cells)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [sheetId, sheetIndex, socket.user.id, socket.user.username, summary || null,
-           changedCells ? JSON.stringify(changedCells) : null]
-        );
-        // Retention: keep only the newest CHANGELOG_LIMIT entries per spreadsheet so the
-        // history table can't grow unbounded and slow down queries over time.
-        await query(
-          `DELETE FROM change_log
-           WHERE spreadsheet_id = $1
-             AND id NOT IN (
-               SELECT id FROM change_log WHERE spreadsheet_id = $1
-               ORDER BY saved_at DESC LIMIT $2
-             )`,
-          [sheetId, CHANGELOG_LIMIT]
-        ).catch(() => { /* retention is best-effort; never block a save */ });
-        const entry = {
-          username: socket.user.username,
-          sheet_index: sheetIndex,
-          summary: summary || null,
-          changed_cells: changedCells || null,
-          saved_at: new Date().toISOString(),
-        };
-        io.to(sheetId).emit('changelog-update', entry);
-      }
+      if (typeof ack === 'function') ack({ ok: true, sheetIndex: result.sheetIndex });
     } catch (err) {
-      socket.emit('error', err.message);
+      const msg = err?.message || 'Ошибка сохранения';
+      if (typeof ack === 'function') ack({ ok: false, error: msg });
+      else socket.emit('error', msg);
     }
   });
 
@@ -209,54 +170,3 @@ cron.schedule('0 2 * * 0', async () => {
 
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-// ── Diff helpers ──────────────────────────────────────────────────────────────
-
-function colNameFromIndex(c) {
-  let name = '';
-  c += 1;
-  while (c > 0) { c -= 1; name = String.fromCharCode(65 + (c % 26)) + name; c = Math.floor(c / 26); }
-  return name;
-}
-
-// Flatten sheet data (as sent by the frontend) into a { "r_c": cellObj } map.
-// The frontend saves data.cells = cellsFromSheet(s) which is already flat { "r_c": {...} }.
-function flattenSavedCells(data) {
-  if (data && typeof data === 'object' && data.cells) return data.cells;
-  return {};
-}
-
-function computeSheetDiff(prevDataRaw, currData) {
-  const prevCells = flattenSavedCells(
-    typeof prevDataRaw === 'string' ? JSON.parse(prevDataRaw) : prevDataRaw
-  );
-  const currCells = flattenSavedCells(currData);
-
-  const allKeys = new Set([...Object.keys(prevCells), ...Object.keys(currCells)]);
-  const changes = [];
-
-  for (const key of allKeys) {
-    const pv = String(prevCells[key]?.v ?? prevCells[key]?.m ?? '').trim();
-    const cv = String(currCells[key]?.v ?? currCells[key]?.m ?? '').trim();
-    if (pv === cv) continue;
-    if (pv === '' && cv === '') continue;
-    const [r, c] = key.split('_').map(Number);
-    changes.push({
-      key,
-      col: `${colNameFromIndex(c)}${r + 1}`,
-      newVal: cv.slice(0, 100),
-      oldVal: pv.slice(0, 100),
-    });
-    if (changes.length >= 200) break;
-  }
-
-  let summary = null;
-  if (changes.length > 0) {
-    const examples = changes.slice(0, 3).map(ch =>
-      `${ch.col}${ch.newVal ? ` ("${ch.newVal.slice(0, 20)}")` : ' (удалено)'}`
-    );
-    summary = `Изменено ячеек: ${changes.length} (${examples.join(', ')})`;
-  }
-
-  return { cells: changes, summary };
-}

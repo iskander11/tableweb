@@ -1,9 +1,15 @@
 import { Router } from 'express';
 import { query } from '../db/index.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
-import { canManageSheet, canCreateSheet } from '../services/permissions.js';
+import { canManageSheet, canCreateSheet, canEditSheet } from '../services/permissions.js';
+import { persistSpreadsheetSheet } from '../services/sheetSave.js';
 
 const router = Router();
+let sheetSaveIo = null;
+
+export function attachSheetSaveIo(io) {
+  sheetSaveIo = io;
+}
 
 // Get spreadsheets accessible to the user
 router.get('/', authenticate, async (req, res) => {
@@ -156,6 +162,39 @@ router.patch('/:id/lock', authenticate, requireAdmin, async (req, res) => {
     [req.params.id]
   );
   res.json({ success: true });
+});
+
+// Persist one worksheet tab (HTTP fallback when WebSocket save fails)
+router.put('/:id/sheets/:sheetIndex', authenticate, async (req, res) => {
+  try {
+    if (!canEditSheet(req.user)) {
+      return res.status(403).json({ error: 'Нет прав на редактирование этой таблицы' });
+    }
+    const sheetIndex = Number(req.params.sheetIndex);
+    if (!Number.isInteger(sheetIndex) || sheetIndex < 0) {
+      return res.status(400).json({ error: 'Некорректный индекс листа' });
+    }
+    const { data, logChange } = req.body || {};
+    if (!data || typeof data !== 'object') {
+      return res.status(400).json({ error: 'Нет данных для сохранения' });
+    }
+
+    const result = await persistSpreadsheetSheet({
+      sheetId: req.params.id,
+      sheetIndex,
+      data,
+      user: req.user,
+      logChange: !!logChange,
+    });
+
+    if (result.entry && sheetSaveIo) {
+      sheetSaveIo.to(req.params.id).emit('changelog-update', result.entry);
+    }
+
+    res.json({ ok: true, sheetIndex: result.sheetIndex });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Ошибка сохранения' });
+  }
 });
 
 // Get change log for a spreadsheet
